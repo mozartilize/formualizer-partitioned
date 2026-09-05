@@ -1,0 +1,50 @@
+[package]
+name = "formualizer-partitioned"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "formualizer_partitioned"
+crate-type = ["cdylib", "rlib"]
+
+[[example]]
+name = "circprobe"
+path = "probe/circprobe.rs"
+
+[[example]]
+name = "memprobe"
+path = "probe/memprobe.rs"
+
+[[example]]
+name = "phaseprobe"
+path = "probe/phaseprobe.rs"
+
+[[example]]
+name = "splitprobe"
+path = "probe/splitprobe.rs"
+
+[features]
+# extension-module unlinks libpython, which the cargo test harness needs.
+# maturin enables it via pyproject; `cargo test --no-default-features` omits it.
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["abi3-py39"] }
+chrono = "0.4"
+quick-xml = "0.37"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# The row stream owns its reader, so it inflates one sheet part itself instead
+# of borrowing the archive. zip already builds flate2 for the deflate feature,
+# so this adds no crate to the build.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+[dependencies.formualizer]
+git = "https://github.com/PSU3D0/formualizer"
+tag = "v0.8.4"
+default-features = false
+features = ["common", "parse", "eval", "workbook", "calamine", "system-clock"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

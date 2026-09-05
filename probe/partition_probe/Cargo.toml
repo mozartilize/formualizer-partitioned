@@ -1,0 +1,15 @@
+[package]
+name = "xlsx-partition-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies.formualizer]
+git = "https://github.com/PSU3D0/formualizer"
+tag = "v0.8.4"
+default-features = false
+features = ["common", "parse", "eval", "workbook", "calamine", "system-clock"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

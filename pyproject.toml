@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "formualizer-partitioned"
+version = "0.1.0"
+description = "Unofficial formualizer extension: memory-bounded xlsx formula evaluation by per-component partitioning and row streaming"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+module-name = "formualizer_partitioned"
+features = ["pyo3/extension-module"]
