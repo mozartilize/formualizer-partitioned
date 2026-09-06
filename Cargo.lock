@@ -107,9 +107,9 @@ dependencies = [
 
 [[package]]
 name = "arrow"
-version = "58.4.0"
+version = "59.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cfdd0833e32a9874d2b55089333ad310c0be208aafa277385ce2461dec90be3"
+checksum = "7c14b3d39f306bc28fd639d59f06e17a0f377d0021e1b7e9054e4d6fedc98774"
 dependencies = [
  "arrow-arith",
  "arrow-array",
@@ -128,9 +128,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-arith"
-version = "58.4.0"
+version = "59.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a41203398f0eaa6f7ec8e62c0da742a21abf282c148fc157f6c35c90e29981a"
+checksum = "ce2961626677665b2195eb59242af4c7befe7b8737ca2050295389362380104e"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -142,9 +142,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-array"
-version = "58.4.0"
+version = "59.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae33dad492b7df00a217563a7b0ef2874df68a0deea1b1a3acf628152f7f7a69"
+checksum = "1e5f6adeffdf587d7a31db5d2266189624b526730cd3627f9ff9fedae97ad584"
 dependencies = [
  "ahash",
  "arrow-buffer",
@@ -160,9 +160,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-buffer"
-version = "58.4.0"
+version = "59.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9552f96391c005e6ab449fa941420935e7e062489b12b8b1b08879b2163f5b5"
+checksum = "097d193003ce7995d5d087089069ec2a6e0187faf5a6f8c9f38af2645d987182"
 dependencies = [
  "bytes",
  "half",
@@ -172,9 +172,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-cast"
-version = "58.4.0"
+version = "59.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a8a327c9649f30d8406995f27642b68df354713cca3baaaf100f076f18d5f34"
+checksum = "635c9c635668ad26adf76cce8fb276c4be7cf06e63bd516de7da514f9680ee53"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -193,9 +193,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-csv"
-version = "58.4.0"
+version = "59.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af0dd6d90d1955e9f9a014c1e563ee8aeffc21909085d25623e1da44d96eca26"
+checksum = "4c2ebf8d631e79b02c16cf5ae860561272c26024ec88fce389a56aaddd558e86"
 dependencies = [
  "arrow-array",
  "arrow-cast",
@@ -208,9 +208,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-data"
-version = "58.4.0"
+version = "59.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b24852db04738907e06c04ea61e42fe7fda962a34513022dc0d0e754fb7976b"
+checksum = "9ba2f832eaeca24b8f26143dba750e42ee4ab51cf7d65e701ca9607cfda9f358"
 dependencies = [
  "arrow-buffer",
  "arrow-schema",
@@ -221,9 +221,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-ipc"
-version = "58.4.0"
+version = "59.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29a908a11fcfb3fb2f6730f4ac15e367bc644e419155e96238f68cf3adde572b"
+checksum = "dcc41681ea80f521df14c36725b74d4c60702c47f0793af2be469c04527e2599"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -235,9 +235,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-json"
-version = "58.4.0"
+version = "59.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8a96aed3931c076adee39ec2a40d8219fc7f09e79bcdaca1df16272993e1e14"
+checksum = "a2f57d7a81969f24ccf80809587b76c09897e6f829d2d65a5976bfb3218851f1"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -260,9 +260,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-ord"
-version = "58.4.0"
+version = "59.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63a083ec750f5c043f02946b4baf05fcdbb55f4560a3277055caca5cc99f3eb0"
+checksum = "2c900759f3bd8354fd4196bc4403eee846894dc2adf66b4225472006a0bf18c5"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -273,9 +273,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-row"
-version = "58.4.0"
+version = "59.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "514ba0ef0d4c5896202dae736251ce415abb43a950bed570fb7981b8716c0e4c"
+checksum = "f4c6425032e28266e3fc4ff680805e57e670d6ea92473043f3e65b7ed6ac79f2"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -286,15 +286,15 @@ dependencies = [
 
 [[package]]
 name = "arrow-schema"
-version = "58.4.0"
+version = "59.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21ca356ad6425cecb6eb7b28e4f659f1ee7880fbb1a16127de7dd62901efee9e"
+checksum = "10fab8d4563491417ba801fab29d205104d20d4bdf37bda6cd1cf425cff598cd"
 
 [[package]]
 name = "arrow-select"
-version = "58.4.0"
+version = "59.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c58da39eb3d8350ad4a549e5c2bc49284dac554016c69829310350f1731b0aad"
+checksum = "fc58569193c2525915f3cc6310edba3792f1200f65d6e9ed330aa33e691493b8"
 dependencies = [
  "ahash",
  "arrow-array",
@@ -306,9 +306,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-string"
-version = "58.4.0"
+version = "59.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6789b388467525e3271326b6b4915666ecfdf5142aef09779445c954b67543c"
+checksum = "2e0813f3c35c1cfea65e14c20a953440f7783c088b7ad2d0db162ccdeefcec14"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -348,9 +348,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "base64"
-version = "0.22.1"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "bitflags"
@@ -685,8 +685,8 @@ dependencies = [
 
 [[package]]
 name = "formualizer"
-version = "0.8.4"
-source = "git+https://github.com/PSU3D0/formualizer?tag=v0.8.4#56f5ef2972d3b19718e2debb0ef329b9c34b90a4"
+version = "0.9.0"
+source = "git+https://github.com/mozartilize/formualizer?rev=c1079ef9#c1079ef99b256aa36a08bf53a83333eece52a4a7"
 dependencies = [
  "formualizer-common",
  "formualizer-eval",
@@ -697,16 +697,16 @@ dependencies = [
 
 [[package]]
 name = "formualizer-common"
-version = "3.0.0"
-source = "git+https://github.com/PSU3D0/formualizer?tag=v0.8.4#56f5ef2972d3b19718e2debb0ef329b9c34b90a4"
+version = "3.1.1"
+source = "git+https://github.com/mozartilize/formualizer?rev=c1079ef9#c1079ef99b256aa36a08bf53a83333eece52a4a7"
 dependencies = [
  "chrono",
 ]
 
 [[package]]
 name = "formualizer-eval"
-version = "0.8.4"
-source = "git+https://github.com/PSU3D0/formualizer?tag=v0.8.4#56f5ef2972d3b19718e2debb0ef329b9c34b90a4"
+version = "0.9.0"
+source = "git+https://github.com/mozartilize/formualizer?rev=c1079ef9#c1079ef99b256aa36a08bf53a83333eece52a4a7"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -730,8 +730,8 @@ dependencies = [
 
 [[package]]
 name = "formualizer-macros"
-version = "0.8.4"
-source = "git+https://github.com/PSU3D0/formualizer?tag=v0.8.4#56f5ef2972d3b19718e2debb0ef329b9c34b90a4"
+version = "0.9.0"
+source = "git+https://github.com/mozartilize/formualizer?rev=c1079ef9#c1079ef99b256aa36a08bf53a83333eece52a4a7"
 dependencies = [
  "formualizer-common",
  "proc-macro2",
@@ -741,8 +741,8 @@ dependencies = [
 
 [[package]]
 name = "formualizer-parse"
-version = "3.0.0"
-source = "git+https://github.com/PSU3D0/formualizer?tag=v0.8.4#56f5ef2972d3b19718e2debb0ef329b9c34b90a4"
+version = "3.1.1"
+source = "git+https://github.com/mozartilize/formualizer?rev=c1079ef9#c1079ef99b256aa36a08bf53a83333eece52a4a7"
 dependencies = [
  "formualizer-common",
  "once_cell",
@@ -763,8 +763,8 @@ dependencies = [
 
 [[package]]
 name = "formualizer-sheetport"
-version = "0.8.4"
-source = "git+https://github.com/PSU3D0/formualizer?tag=v0.8.4#56f5ef2972d3b19718e2debb0ef329b9c34b90a4"
+version = "0.9.0"
+source = "git+https://github.com/mozartilize/formualizer?rev=c1079ef9#c1079ef99b256aa36a08bf53a83333eece52a4a7"
 dependencies = [
  "chrono",
  "formualizer-common",
@@ -780,14 +780,15 @@ dependencies = [
 
 [[package]]
 name = "formualizer-workbook"
-version = "0.8.4"
-source = "git+https://github.com/PSU3D0/formualizer?tag=v0.8.4#56f5ef2972d3b19718e2debb0ef329b9c34b90a4"
+version = "0.9.0"
+source = "git+https://github.com/mozartilize/formualizer?rev=c1079ef9#c1079ef99b256aa36a08bf53a83333eece52a4a7"
 dependencies = [
  "calamine",
  "chrono",
  "formualizer-common",
  "formualizer-eval",
  "formualizer-parse",
+ "memmap2",
  "once_cell",
  "parking_lot",
  "quick-xml 0.39.4",
@@ -1049,6 +1050,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "memmap2"
+version = "0.9.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "memoffset"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1069,9 +1079,9 @@ dependencies = [
 
 [[package]]
 name = "num-bigint"
-version = "0.4.8"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
 dependencies = [
  "num-integer",
  "num-traits",
@@ -1514,7 +1524,7 @@ dependencies = [
 [[package]]
 name = "sheetport-spec"
 version = "0.3.1"
-source = "git+https://github.com/PSU3D0/formualizer?tag=v0.8.4#56f5ef2972d3b19718e2debb0ef329b9c34b90a4"
+source = "git+https://github.com/mozartilize/formualizer?rev=c1079ef9#c1079ef99b256aa36a08bf53a83333eece52a4a7"
 dependencies = [
  "anyhow",
  "chrono",
