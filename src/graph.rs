@@ -12,6 +12,21 @@
 //! master anchor; every member cell reuses that AST and shifts relative
 //! references by its offset from the anchor. That keeps parse count at the
 //! number of distinct formulas rather than the number of formula cells.
+//!
+//! # Before optimizing the containers in this file
+//!
+//! Building the topology is 5-10% of a partitioned run. Measured with
+//! `probe/phaseprobe.rs`: 390 ms of build against 7540 ms of evaluation on a
+//! 265,587-formula workbook, and 26.5 ms against 159.7 ms on an
+//! 8,378-formula one. That time goes to inflating and tokenizing sheet XML,
+//! parsing, and walking ASTs, then to formula placement and evaluation inside
+//! the engine. It does not go to the maps and sets below.
+//!
+//! So replacing a container here with a faster one cannot move the total by
+//! 1%, even if the replacement were free. Two such replacements were tried
+//! and measured slower; see the comments at `dense` and `boxes` in
+//! `build_from`. Profile the run phase and target formula placement before
+//! changing anything in this file for speed.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Cursor, Read};
@@ -1794,6 +1809,15 @@ pub fn build_from(src: Sources) -> Topology {
     }
 
     // Compact DSU roots into dense component ids.
+    //
+    // This map is probed once per formula cell, but it holds one entry per
+    // *component*, not per cell: 3,612 entries for 265,587 formula cells on a
+    // measured workbook. It therefore stays in cache and the probes are
+    // already cheap. Replacing it with a direct-addressed `Vec<u32>` sentinel
+    // table of length `n` was measured and was not an improvement: build went
+    // from 371-399 ms to 388-416 ms and build memory from +94.6 MB to
+    // +95.3 MB, because the table allocates 1.06 MB to replace a map costing a
+    // fraction of that. Keep the map.
     let mut dense: HashMap<u32, u32> = HashMap::new();
     let mut comp_of = vec![0u32; n];
     for i in 0..n {
@@ -1807,6 +1831,13 @@ pub fn build_from(src: Sources) -> Topology {
     let mut comp_refs: Vec<Vec<RangeRef>> = vec![Vec::new(); n_comp];
     // Bounding box per (component, sheet) so a cross-sheet component sums its
     // per-sheet boxes instead of spanning a meaningless union.
+    //
+    // Keyed by (component, sheet) rather than by cell, so like `dense` above
+    // this map is small and cache-resident. Rebuilding the same sums with a
+    // per-component linear scan over `comp_cells` was measured alongside the
+    // `dense` change and showed no gain either. The extents are summed as
+    // `u64`, so iteration order cannot affect the result and this map does not
+    // need an ordered type.
     let mut boxes: HashMap<(u32, u16), BBox> = HashMap::new();
     for i in 0..n {
         let c = comp_of[i] as usize;

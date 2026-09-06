@@ -72,7 +72,7 @@
 //! chunk layout rejects work above `DEFAULT_LOOKUP_BUDGET`, and the caller
 //! falls back to the component layout.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use formualizer::common::value::LiteralValue;
@@ -425,13 +425,19 @@ pub fn run(
 
     for batch in &batches {
         let mut cells: Vec<u32> = Vec::new();
-        let mut ranges: HashSet<RangeRef> = HashSet::new();
+        let mut ranges: Vec<RangeRef> = Vec::new();
         for &c in batch {
             cells.extend_from_slice(&topo.comp_cells[c as usize]);
-            // Identical ranges collapse here, which matters when thousands of
-            // formulas all read the same lookup table.
             ranges.extend(topo.comp_refs[c as usize].iter().copied());
         }
+        // Identical ranges collapse here, which matters when thousands of
+        // formulas all read the same lookup table. Sorting before the dedup
+        // also fixes the order every later step sees: sheets are added to the
+        // batch workbook and inputs are copied in this order, so it must not
+        // vary between runs. A `HashSet` deduplicates just as well but leaves
+        // that order arbitrary, which is why this is a sorted `Vec`.
+        ranges.sort_unstable();
+        ranges.dedup();
         // The batch copies each distinct range once, so its cost is the
         // formulas plus the union area, matching `plan_batches`.
         let batch_cells =
@@ -659,7 +665,18 @@ fn place_formulas(
     units: Vec<Vec<(u16, u32, u32, ASTNode)>>,
 ) -> Result<(), String> {
     for unit in units {
-        let mut by_sheet: HashMap<u16, Vec<(u32, u32, ASTNode)>> = HashMap::new();
+        // Sheet order must not vary between runs. Bulk ingest is fed one
+        // sheet at a time, and a dependency chain split across two calls reads
+        // stale values from the split point on without reporting an error, so
+        // a random iteration order would move that split from run to run.
+        //
+        // Do not change this to `HashMap` for speed. A unit holds a handful of
+        // sheets, so ordering them costs nothing measurable, and a randomly
+        // ordered map produced results that differed between runs of the same
+        // binary on the same file: mismatches against a whole-file run moved
+        // between 102 and 145 across ten runs, and were a fixed 39 once this
+        // map was ordered.
+        let mut by_sheet: BTreeMap<u16, Vec<(u32, u32, ASTNode)>> = BTreeMap::new();
         for (sheet, row, col, ast) in unit {
             let name = &topo.sheets[sheet as usize].name;
             if reads_open_own_range(&ast, name) {
@@ -691,9 +708,24 @@ fn place_formulas(
 fn copy_inputs(
     store: &DataStore,
     topo: &Topology,
-    ranges: &HashSet<RangeRef>,
+    ranges: &[RangeRef],
     wb: &mut Workbook,
 ) -> Result<(), String> {
+    // Skips a cell an earlier range already copied.
+    //
+    // This must stay while ranges can overlap. The caller sorts and dedups the
+    // range list, but that collapses only *identical* rectangles: two
+    // overlapping but distinct rectangles, such as `A6:A64` and `A6:A53` from
+    // repeated lookups down one column, still walk the same cells. Dropping
+    // this set requires genuinely disjoint rectangles, which means containment
+    // pruning and then a rectangle union, not a cheaper set type.
+    //
+    // That work was considered and not done. A partitioned run's time is in
+    // formula placement and evaluation inside the engine, not in this copy
+    // (measured: 7540 ms of run against 390 ms of topology build on a
+    // 265,587-formula workbook). Before building rectangle merging, measure
+    // `copy_inputs` itself on a batch with a large range union and show that
+    // it is worth the complexity.
     let mut seen: HashSet<(u16, u32, u32)> = HashSet::new();
     let mut failed = None;
     for &(s, r0, c0, r1, c1) in ranges {
@@ -856,7 +888,9 @@ pub fn plan_scratch(
 
     // Group the formula cells by column, and check that each column repeats one
     // template at a fixed offset.
-    let mut by_col: HashMap<u32, Vec<u32>> = HashMap::new();
+    // Ordered, so that when more than one column is faulty the refusal reason
+    // reported for the file does not depend on map iteration order.
+    let mut by_col: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     for (i, fc) in topo.cells.iter().enumerate() {
         by_col.entry(fc.col).or_default().push(i as u32);
     }
@@ -1046,7 +1080,11 @@ fn scratch_workbook(
                 .map_err(|e| e.to_string())?;
         }
     }
-    let statics: HashSet<RangeRef> = plan.static_ranges.iter().copied().collect();
+    // Sorted and deduped rather than collected into a set, so the copy order
+    // is the same on every run.
+    let mut statics: Vec<RangeRef> = plan.static_ranges.clone();
+    statics.sort_unstable();
+    statics.dedup();
     copy_inputs(store, topo, &statics, &mut wb)?;
     for defined in &plan.static_names {
         define_static_name(&mut wb, topo, defined)?;
