@@ -1,6 +1,6 @@
 //! Where the component path spends time and memory, phase by phase.
 //!
-//! Run: cargo run --release --no-default-features --example phaseprobe -- FILE...
+//! Run: cargo run --release --manifest-path probe/Cargo.toml --bin phaseprobe -- FILE...
 
 use std::time::Instant;
 

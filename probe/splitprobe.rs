@@ -1,7 +1,7 @@
 //! Check whether a formula ingested in one bulk call can read a formula
 //! ingested in an earlier bulk call on the same workbook.
 //!
-//! Run: cargo run --release --no-default-features --example splitprobe
+//! Run: cargo run --release --manifest-path probe/Cargo.toml --bin splitprobe
 
 use formualizer::common::value::LiteralValue;
 use formualizer::parse::parser::parse;

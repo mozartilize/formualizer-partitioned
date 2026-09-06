@@ -3,7 +3,7 @@
 //! measured afterwards reads as zero. Peak (VmHWM) in a fresh process is the
 //! only honest number.
 //!
-//! Run: cargo run --release --no-default-features --example memprobe -- <scenario> <xlsx-file>
+//! Run: cargo run --release --manifest-path probe/Cargo.toml --bin memprobe -- <scenario> <xlsx-file>
 
 use formualizer::common::value::LiteralValue;
 use formualizer::workbook::backends::CalamineAdapter;

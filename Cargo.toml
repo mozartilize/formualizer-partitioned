@@ -7,22 +7,6 @@ edition = "2021"
 name = "formualizer_partitioned"
 crate-type = ["cdylib", "rlib"]
 
-[[example]]
-name = "circprobe"
-path = "probe/circprobe.rs"
-
-[[example]]
-name = "memprobe"
-path = "probe/memprobe.rs"
-
-[[example]]
-name = "phaseprobe"
-path = "probe/phaseprobe.rs"
-
-[[example]]
-name = "splitprobe"
-path = "probe/splitprobe.rs"
-
 [features]
 # extension-module unlinks libpython, which the cargo test harness needs.
 # maturin enables it via pyproject; `cargo test --no-default-features` omits it.

@@ -1,7 +1,7 @@
 //! Check whether an unbounded column range triggers a false circular error
 //! under bulk ingest, and whether clamping the range to the used rows avoids it.
 //!
-//! Run: cargo run --release --no-default-features --example circprobe
+//! Run: cargo run --release --manifest-path probe/Cargo.toml --bin circprobe
 
 use formualizer::common::value::LiteralValue;
 use formualizer::parse::parser::parse;

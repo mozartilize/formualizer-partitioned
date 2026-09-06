@@ -1,0 +1,51 @@
+[package]
+name = "probes"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone so the library manifest carries no probe declarations. `probes`
+# is its own workspace root: `partition_probe` is a separate crate that lives
+# here and pins its own engine revision, so it is excluded rather than pulled
+# in as a member.
+[workspace]
+exclude = ["partition_probe"]
+
+[[bin]]
+name = "circprobe"
+path = "circprobe.rs"
+
+[[bin]]
+name = "memprobe"
+path = "memprobe.rs"
+
+[[bin]]
+name = "nameprobe"
+path = "nameprobe.rs"
+
+[[bin]]
+name = "phaseprobe"
+path = "phaseprobe.rs"
+
+[[bin]]
+name = "splitprobe"
+path = "splitprobe.rs"
+
+[dependencies.formualizer]
+# Keep this revision in step with the library manifest. A probe that measures a
+# different engine than the library builds against reports nothing useful.
+git = "https://github.com/mozartilize/formualizer"
+rev = "c1079ef9"
+default-features = false
+features = ["common", "parse", "eval", "workbook", "calamine", "system-clock"]
+
+[dependencies.formualizer-partitioned]
+# `memprobe` and `phaseprobe` measure the library's own phases. The default
+# feature is `extension-module`, which unlinks libpython and leaves a binary
+# that cannot start, so the probes take the library without it.
+path = ".."
+default-features = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
