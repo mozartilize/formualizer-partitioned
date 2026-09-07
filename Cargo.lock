@@ -686,7 +686,7 @@ dependencies = [
 [[package]]
 name = "formualizer"
 version = "0.9.0"
-source = "git+https://github.com/mozartilize/formualizer?rev=c1079ef9#c1079ef99b256aa36a08bf53a83333eece52a4a7"
+source = "git+https://github.com/mozartilize/formualizer?rev=2be5f57e#2be5f57e502923c6b8d4d7b0a108da4d7ceb88a2"
 dependencies = [
  "formualizer-common",
  "formualizer-eval",
@@ -698,7 +698,7 @@ dependencies = [
 [[package]]
 name = "formualizer-common"
 version = "3.1.1"
-source = "git+https://github.com/mozartilize/formualizer?rev=c1079ef9#c1079ef99b256aa36a08bf53a83333eece52a4a7"
+source = "git+https://github.com/mozartilize/formualizer?rev=2be5f57e#2be5f57e502923c6b8d4d7b0a108da4d7ceb88a2"
 dependencies = [
  "chrono",
 ]
@@ -706,7 +706,7 @@ dependencies = [
 [[package]]
 name = "formualizer-eval"
 version = "0.9.0"
-source = "git+https://github.com/mozartilize/formualizer?rev=c1079ef9#c1079ef99b256aa36a08bf53a83333eece52a4a7"
+source = "git+https://github.com/mozartilize/formualizer?rev=2be5f57e#2be5f57e502923c6b8d4d7b0a108da4d7ceb88a2"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -731,7 +731,7 @@ dependencies = [
 [[package]]
 name = "formualizer-macros"
 version = "0.9.0"
-source = "git+https://github.com/mozartilize/formualizer?rev=c1079ef9#c1079ef99b256aa36a08bf53a83333eece52a4a7"
+source = "git+https://github.com/mozartilize/formualizer?rev=2be5f57e#2be5f57e502923c6b8d4d7b0a108da4d7ceb88a2"
 dependencies = [
  "formualizer-common",
  "proc-macro2",
@@ -742,7 +742,7 @@ dependencies = [
 [[package]]
 name = "formualizer-parse"
 version = "3.1.1"
-source = "git+https://github.com/mozartilize/formualizer?rev=c1079ef9#c1079ef99b256aa36a08bf53a83333eece52a4a7"
+source = "git+https://github.com/mozartilize/formualizer?rev=2be5f57e#2be5f57e502923c6b8d4d7b0a108da4d7ceb88a2"
 dependencies = [
  "formualizer-common",
  "once_cell",
@@ -764,7 +764,7 @@ dependencies = [
 [[package]]
 name = "formualizer-sheetport"
 version = "0.9.0"
-source = "git+https://github.com/mozartilize/formualizer?rev=c1079ef9#c1079ef99b256aa36a08bf53a83333eece52a4a7"
+source = "git+https://github.com/mozartilize/formualizer?rev=2be5f57e#2be5f57e502923c6b8d4d7b0a108da4d7ceb88a2"
 dependencies = [
  "chrono",
  "formualizer-common",
@@ -781,7 +781,7 @@ dependencies = [
 [[package]]
 name = "formualizer-workbook"
 version = "0.9.0"
-source = "git+https://github.com/mozartilize/formualizer?rev=c1079ef9#c1079ef99b256aa36a08bf53a83333eece52a4a7"
+source = "git+https://github.com/mozartilize/formualizer?rev=2be5f57e#2be5f57e502923c6b8d4d7b0a108da4d7ceb88a2"
 dependencies = [
  "calamine",
  "chrono",
@@ -1524,7 +1524,7 @@ dependencies = [
 [[package]]
 name = "sheetport-spec"
 version = "0.3.1"
-source = "git+https://github.com/mozartilize/formualizer?rev=c1079ef9#c1079ef99b256aa36a08bf53a83333eece52a4a7"
+source = "git+https://github.com/mozartilize/formualizer?rev=2be5f57e#2be5f57e502923c6b8d4d7b0a108da4d7ceb88a2"
 dependencies = [
  "anyhow",
  "chrono",

@@ -377,13 +377,6 @@ fn partition_verdict(
     if topo.array_formulas > 0 {
         return Some("array formulas");
     }
-    // A text criterion matches through text lanes whose content depends on
-    // how the workbook was built, so a loader-built workbook and an
-    // incrementally-built one can answer the same cells differently.
-    // `COUNTBLANK` counts nulls directly and is not affected.
-    if topo.text_criteria_ifs > 0 {
-        return Some("text-criteria aggregates");
-    }
     if topo.self_refs > 0 {
         return Some("self-referencing formulas");
     }
@@ -1150,10 +1143,12 @@ mod tests {
     }
 
     #[test]
-    fn text_criteria_aggregates_keep_the_whole_file_path() {
-        // Text criteria match through build-dependent text lanes, so these
-        // calls stay whole-file even though blank presence itself
-        // partitions (see the `COUNTBLANK` case in `partition::tests`).
+    fn text_criteria_aggregates_partition_now() {
+        // At the pinned engine rev both text lanes render numeric and
+        // boolean cells to their string forms, so a text criterion answers
+        // identically in a loader-built and an incrementally-built
+        // workbook (and follows Excel coercion). These calls no longer
+        // gate; the counter stays as a diagnostic.
         let cases = [
             "COUNTIF(G$2:G$37,\"\")",
             "COUNTIF(G$2:G$37,\"1\")",
@@ -1165,28 +1160,15 @@ mod tests {
         for formula in cases {
             let sheet = cell_f("G43", formula);
             let t = topology(&xlsx(&[("S", &sheet)]));
-            assert_eq!(
-                partition_verdict(&t, DEFAULT_MAX_RATIO, 0, false),
-                Some("text-criteria aggregates"),
-                "{formula}"
-            );
-        }
-        // A numeric comparison criterion and `COUNTBLANK` partition.
-        for formula in ["COUNTIF(G$2:G$37,\">0\")", "SUMIF(G$2:G$37,\"<=5.5\")"] {
-            let sheet = cell_f("G43", formula);
-            let t = topology(&xlsx(&[("S", &sheet)]));
+            // The text-criteria gate is gone; a later gate such as the
+            // ratio check may still fire on this empty fixture.
             assert_ne!(
                 partition_verdict(&t, DEFAULT_MAX_RATIO, 0, false),
                 Some("text-criteria aggregates"),
                 "{formula}"
             );
+            assert!(t.text_criteria_ifs > 0, "{formula} must still be counted");
         }
-        let sheet = cell_f("G44", "COUNTBLANK(G$2:G$37)");
-        let t = topology(&xlsx(&[("S", &sheet)]));
-        assert_ne!(
-            partition_verdict(&t, DEFAULT_MAX_RATIO, 0, false),
-            Some("text-criteria aggregates")
-        );
     }
 
     fn rejected_formulas_are_never_reported_as_formula_free() {

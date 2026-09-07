@@ -201,7 +201,14 @@ pub fn fold_and_rewrite(data: &[u8], src: &mut Sources) -> Report {
     sheets.dedup();
     for sheet in sheets {
         let idx: Vec<usize> = (0..keys.len()).filter(|&i| keys[i].sheet == sheet).collect();
-        match fold_sheet(data, &keys, &idx, sheet, &mut states) {
+        match fold_sheet(
+            data,
+            &keys,
+            &idx,
+            sheet,
+            &mut states,
+            &src.blanks[sheet as usize],
+        ) {
             Ok(n) => chunks += n,
             Err(()) => {
                 for &i in &idx {
@@ -578,6 +585,7 @@ fn fold_sheet(
     idx: &[usize],
     sheet: u16,
     states: &mut [State],
+    blanks: &[(u32, u32)],
 ) -> Result<usize, ()> {
     // The columns of every aggregate on this sheet, and the rows they span.
     let mut cols: Vec<u32> = Vec::new();
@@ -620,6 +628,16 @@ fn fold_sheet(
             cells.push((r, c, v));
         }
     });
+    // A declared cell with no value is still a blank, and blank-aware calls
+    // such as `COUNTIF(range,"")` count it. The reader skips such cells, so
+    // add the recorded ones that fall inside the wanted area. The position
+    // set dedups against a value the reader did yield for the same cell.
+    let mut seen: HashSet<(u32, u32)> = cells.iter().map(|&(r, c, _)| (r, c)).collect();
+    for &(r, c) in blanks {
+        if r >= first_row && r <= last_row && wanted.contains(&c) && seen.insert((r, c)) {
+            cells.push((r, c, LiteralValue::Empty));
+        }
+    }
     drop(zip);
     cells.sort_by_key(|&(r, c, _)| (r, c));
 
@@ -1298,6 +1316,26 @@ mod tests {
         let joined = src.texts.join(" ");
         assert!(joined.contains("10"), "first band: {joined}");
         assert!(joined.contains("33"), "second band: {joined}");
+    }
+
+    /// A declared cell with no value counts as a blank: the reader yields
+    /// nothing for it, so the fold must add the recorded blank positions or
+    /// `COUNTIF(range,"")` folds one short of the whole-file answer.
+    #[test]
+    fn a_declared_blank_cell_folds_into_blank_counts() {
+        let mut sheet = String::new();
+        sheet.push_str(&cell_v("A1", "1"));
+        sheet.push_str(r#"<c r="A2" s="26" t="n"/>"#);
+        sheet.push_str(&cell_v("A3", "3"));
+        sheet.push_str(&cell_f("D1", r#"COUNTIF(A1:A3,"")*1"#));
+        let data = xlsx(&[("S", &sheet)]);
+        let (src, report) = fold_once(&data);
+        assert_eq!(report.folded, 1);
+        let joined = src.texts.join(" ");
+        assert!(
+            joined.contains("(1)*(1)"),
+            "the blank must fold to 1, got: {joined}"
+        );
     }
 
     /// A criterion that matches a blank must not count the unused rows of a

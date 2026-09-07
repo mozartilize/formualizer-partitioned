@@ -24,12 +24,12 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [dependencies.formualizer]
-# Pinned to the fork branch carrying the bulk-ingest edge-loss fix, by exact
-# revision so a force-push cannot change what a benchmark measured. Move back
-# to an upstream tag once the fix is released.
+# Pinned to the fork branch carrying the bulk-ingest edge-loss fix and the
+# text-lane coercion fix, by exact revision so a force-push cannot change
+# what a benchmark measured. Move back to an upstream tag once released.
 # https://github.com/mozartilize/formualizer/tree/fix/bulk-ingest-partial-vertex-set
 git = "https://github.com/mozartilize/formualizer"
-rev = "c1079ef9"
+rev = "2be5f57e"
 default-features = false
 features = ["common", "parse", "eval", "workbook", "calamine", "system-clock"]
 

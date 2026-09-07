@@ -242,11 +242,8 @@ pub struct Sources {
     /// The scratch path moves a formula to another row. That move changes what
     /// these functions return, so it rejects these files.
     pub row_sensitive_fns: u64,
-    /// Aggregate calls whose criterion is a text literal that is not a
-    /// numeric comparison, in a `TEXT_CRITERIA_FNS` function. The engine
-    /// matches text criteria through text lanes whose content depends on
-    /// how the workbook was built, so two workbook builds cannot be made to
-    /// agree on the same cells, and these files keep the whole-file path.
+    /// Aggregate calls whose criterion takes the engine's text-lane path.
+    /// Diagnostic; see the `TEXT_CRITERIA_FNS` comment.
     pub text_criteria_ifs: u64,
     /// Whether each distinct formula source can produce a spilled array.
     ///
@@ -320,8 +317,8 @@ pub struct Topology {
     /// Formulas that read their own cell position. See
     /// `Sources::row_sensitive_fns`.
     pub row_sensitive_fns: u64,
-    /// Aggregate calls with a text criterion. See
-    /// `Sources::text_criteria_ifs`.
+    /// Aggregate calls whose criterion takes the engine's text-lane path.
+    /// Diagnostic; see the `TEXT_CRITERIA_FNS` comment.
     pub text_criteria_ifs: u64,
     /// Whether each distinct formula source can produce a spilled array.
     /// See `Sources::array_capable`.
@@ -1401,17 +1398,17 @@ const NONDETERMINISTIC_FNS: [&str; 4] = ["RAND", "RANDARRAY", "RANDBETWEEN", "IN
 /// scan the table. See `Topology::lookup_work`.
 const LOOKUP_FNS: [&str; 6] = ["VLOOKUP", "HLOOKUP", "LOOKUP", "MATCH", "XLOOKUP", "XMATCH"];
 
-/// Aggregate calls whose criterion matching cannot be partitioned.
+/// Aggregate calls whose criterion takes the engine's text-lane path.
 ///
-/// A text criterion such as `COUNTIF(range,"1")` or `SUMIF(range,"")`
-/// matches through text lanes whose content depends on how the workbook was
-/// built: the same cells answer differently in a loader-built workbook and
-/// in an incrementally-built one (bulk vs `set_value` order, declared
-/// dimensions, styles). The two paths cannot be made to agree, so any
-/// criterion that is not a numeric comparison keeps the whole-file path.
-/// A criterion such as `">0"` parses to a numeric predicate and is safe.
-/// `COUNTBLANK` counts nulls directly without the text-lane mask and is
-/// not affected.
+/// A text criterion such as `COUNTIF(range,"1")` matches through the
+/// engine's lowered-text lane. At the pinned engine rev the base lane and
+/// the overlay lane render a cell the same way: text lowercased, numbers
+/// and booleans to their string forms. A text criterion therefore answers
+/// identically in a loader-built workbook and an incrementally-built one
+/// (a batch, a scratch probe), and follows Excel coercion, so these calls
+/// partition. The counter is diagnostic; the numeric-comparison split is
+/// kept because `">0"`-style criteria never touch the lane. `COUNTBLANK`
+/// counts nulls directly and is not counted.
 const TEXT_CRITERIA_FNS: [&str; 6] =
     ["COUNTIF", "COUNTIFS", "SUMIF", "SUMIFS", "AVERAGEIF", "AVERAGEIFS"];
 
@@ -1495,8 +1492,8 @@ fn major_axis_range(index: &[(u32, u32)], lo: u32, hi: u32) -> &[(u32, u32)] {
 /// `dynamic` counts references that only exist at evaluation time.
 /// `row_sensitive` counts calls whose result depends on the formula position.
 /// `nondeterministic` counts calls that two engines cannot be made to agree on.
-/// `text_criteria` counts aggregate calls whose criterion matching two
-/// workbook builds cannot be made to agree on.
+/// `text_criteria` counts aggregate calls whose criterion takes the
+/// engine's text-lane path.
 fn classify(
     node: &ASTNode,
     dynamic: &mut u64,
@@ -1548,13 +1545,17 @@ fn classify(
     }
 }
 
-/// Whether a call subtree holds a criterion the two paths cannot agree on.
+/// Whether a call subtree holds a criterion that takes the text-lane
+/// path.
 ///
-/// A text literal is unsafe unless it is a numeric comparison such as
+/// A text literal is lane-bound unless it is a numeric comparison such as
 /// `">0"`. A computed criterion such as `IF(A1="x","",">0")` can answer a
 /// text at evaluation time, so any text literal anywhere in the subtree
 /// counts; a text outside the call is a value, not a criterion, and is
-/// correctly ignored.
+/// correctly ignored. A criterion passed as a bare cell reference
+/// (`COUNTIF(range,B1)`) takes the same lane but carries no literal, so it
+/// was never counted — the counter was never a complete list of lane-bound
+/// calls, and the engine fix does not depend on it.
 fn has_unsafe_criteria_text(node: &ASTNode) -> bool {
     match &node.node_type {
         ASTNodeType::Literal(LiteralValue::Text(s)) => !is_numeric_comparison(s),
@@ -1573,8 +1574,8 @@ fn has_unsafe_criteria_text(node: &ASTNode) -> bool {
 
 /// Whether a criteria text is a comparison against a number, such as
 /// `">0"` or `"<=5.5"`. Numeric comparisons take the numeric predicate
-/// path, which agrees across workbook builds; every other text criterion
-/// takes the build-dependent text-lane path.
+/// path and never touch the text lane; every other text criterion takes
+/// the text-lane path.
 fn is_numeric_comparison(s: &str) -> bool {
     let t = s.trim();
     let rhs = if let Some(r) = t.strip_prefix(">=") {

@@ -2545,6 +2545,27 @@ mod tests {
         assert_eq!(whole_value(&free, "S", 2, 2), Some(LiteralValue::Number(10.0)));
     }
 
+    /// Engine-behavior guard for the text-criteria ungate: a text criterion
+    /// over a numeric range must coerce, and a wildcard must match text
+    /// only, on the whole-file path itself. A stale engine revision (one
+    /// whose base text lane holds text only) fails these loudly instead of
+    /// silently answering differently from a batch.
+    #[test]
+    fn text_criteria_coerce_on_the_whole_file_path() {
+        let mut sheet = String::new();
+        sheet.push_str(&cell_v("A1", "1"));
+        sheet.push_str(&cell_v("A2", "2"));
+        sheet.push_str(&cell_v("A3", "100"));
+        sheet.push_str(&cell_v("A4", "1x"));
+        sheet.push_str(&cell_f("C1", r#"COUNTIF(A1:A4,"1")"#));
+        sheet.push_str(&cell_f("C2", r#"COUNTIF(A1:A4,"1*")"#));
+        let data = xlsx(&[("S", &sheet)]);
+        // The numeric 1 matches the text criterion (Excel coercion).
+        assert_eq!(whole_value(&data, "S", 1, 3), Some(LiteralValue::Number(1.0)));
+        // The wildcard matches the text "1x" only, not the numbers.
+        assert_eq!(whole_value(&data, "S", 2, 3), Some(LiteralValue::Number(1.0)));
+    }
+
     /// Engine-behavior guard for the reducer screen. If a future engine
     /// adds elementwise lifting, `ABS(A1:A3)` would spill and
     /// `REDUCING_FNS` would hide it; these assertions must fail loudly
