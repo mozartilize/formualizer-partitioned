@@ -12,6 +12,79 @@ pub fn xlsx(sheets: &[(&str, &str)]) -> Vec<u8> {
     xlsx_with_defined_names(sheets, "")
 }
 
+/// Build a workbook whose `cell_s` cells read from a shared string table.
+pub fn xlsx_with_shared_strings(sheets: &[(&str, &str)], strings: &[&str]) -> Vec<u8> {
+    let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let opts =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+    let mut wb = String::from(r#"<?xml version="1.0"?><workbook><sheets>"#);
+    let mut rels = String::from(r#"<?xml version="1.0"?><Relationships>"#);
+    let mut types = String::from(
+        r#"<?xml version="1.0"?><Types><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>"#,
+    );
+    for (i, (name, _)) in sheets.iter().enumerate() {
+        let n = i + 1;
+        wb.push_str(&format!(
+            r#"<sheet name="{name}" sheetId="{n}" r:id="rId{n}"/>"#
+        ));
+        rels.push_str(&format!(
+            r#"<Relationship Id="rId{n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{n}.xml"/>"#
+        ));
+        types.push_str(&format!(
+            r#"<Override PartName="/xl/worksheets/sheet{n}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>"#
+        ));
+    }
+    let shared = sheets.len() + 1;
+    rels.push_str(&format!(
+        r#"<Relationship Id="rId{shared}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>"#
+    ));
+    types.push_str(
+        r#"<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>"#,
+    );
+    types.push_str("</Types>");
+    wb.push_str("</sheets></workbook>");
+    rels.push_str("</Relationships>");
+
+    let mut sst = format!(
+        r#"<?xml version="1.0"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="{}" uniqueCount="{}">"#,
+        strings.len(),
+        strings.len()
+    );
+    for s in strings {
+        sst.push_str("<si><t>");
+        sst.push_str(&s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"));
+        sst.push_str("</t></si>");
+    }
+    sst.push_str("</sst>");
+
+    // The engine's loader (calamine) requires the package relationships and
+    // content types that this crate's own streaming reader never looks at.
+    w.start_file("_rels/.rels", opts).unwrap();
+    w.write_all(
+        br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+    )
+    .unwrap();
+    w.start_file("[Content_Types].xml", opts).unwrap();
+    w.write_all(types.as_bytes()).unwrap();
+    w.start_file("xl/workbook.xml", opts).unwrap();
+    w.write_all(wb.as_bytes()).unwrap();
+    w.start_file("xl/_rels/workbook.xml.rels", opts).unwrap();
+    w.write_all(rels.as_bytes()).unwrap();
+    w.start_file("xl/sharedStrings.xml", opts).unwrap();
+    w.write_all(sst.as_bytes()).unwrap();
+    for (i, (_, data)) in sheets.iter().enumerate() {
+        w.start_file(format!("xl/worksheets/sheet{}.xml", i + 1), opts)
+            .unwrap();
+        w.write_all(
+            format!(r#"<?xml version="1.0"?><worksheet><sheetData>{data}</sheetData></worksheet>"#)
+                .as_bytes(),
+        )
+        .unwrap();
+    }
+    w.finish().unwrap().into_inner()
+}
+
 /// Build a workbook and put the supplied entries inside `<definedNames>`.
 pub fn xlsx_with_defined_names(sheets: &[(&str, &str)], defined_names: &str) -> Vec<u8> {
     let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
@@ -82,5 +155,5 @@ pub fn cell_v(addr: &str, value: &str) -> String {
 
 /// A cell that holds a shared string index.
 pub fn cell_s(addr: &str, index: usize) -> String {
-    format!(r#"<c r="{addr}" t="str"><v>{index}</v></c>"#)
+    format!(r#"<c r="{addr}" t="s"><v>{index}</v></c>"#)
 }

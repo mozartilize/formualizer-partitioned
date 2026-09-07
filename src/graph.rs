@@ -31,7 +31,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{Cursor, Read};
 
-use crate::values::{decode_text, raw_attr, read_text_element, Val, Values};
+use crate::values::{decode_escapes, decode_text, raw_attr, read_text_element, Val, Values};
 use formualizer::LiteralValue;
 use formualizer::parse::parser::{parse, ASTNode, ASTNodeType, ReferenceType};
 use quick_xml::events::Event;
@@ -1074,7 +1074,7 @@ pub fn read(data: &[u8]) -> Sources {
                         in_v = false;
                         if let Some((r, c)) = cur {
                             if let Some(val) = decoder.value(
-                                &v_text,
+                                &decode_escapes(&v_text),
                                 cur_style.as_deref(),
                                 cur_ty.as_deref(),
                             ) {

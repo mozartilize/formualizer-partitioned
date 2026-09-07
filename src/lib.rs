@@ -807,6 +807,13 @@ fn eval_rows_impl(
                         .map_err(|e| PyRuntimeError::new_err(format!("reading values failed: {e}")))?;
                     let evaluated = run_partitioned(&store, &topo, budget, &Layout::Chunks(plan))
                         .map_err(|e| PyRuntimeError::new_err(format!("partitioned eval failed: {e}")))?;
+                    // A spill the whole-file run would block on cannot be
+                    // represented here, so the run falls back to it.
+                    if evaluated.spill_detected {
+                        let rows = whole_row_iter(data, &topo, trim, "spill detected in a partitioned batch")?;
+                        let info = RunInfo { impl_mode: "whole", stream_refusal: Some(e), chunk, n_batches };
+                        return Ok((rows, info));
+                    }
                     let rows = RowIter {
                         source: RowSource::Partitioned { topo, store, values: evaluated.values },
                         sheets,
@@ -824,6 +831,13 @@ fn eval_rows_impl(
             let store = partition::DataStore::load(&mut topo);
             let evaluated = run_partitioned(&store, &topo, budget, &Layout::Components)
                 .map_err(|e| PyRuntimeError::new_err(format!("partitioned eval failed: {e}")))?;
+            // A spill the whole-file run would block on cannot be
+            // represented here, so the run falls back to it.
+            if evaluated.spill_detected {
+                let rows = whole_row_iter(data, &topo, trim, "spill detected in a partitioned batch")?;
+                let info = RunInfo { impl_mode: "whole", stream_refusal: None, chunk: None, n_batches };
+                return Ok((rows, info));
+            }
             let rows = RowIter {
                 source: RowSource::Partitioned { topo, store, values: evaluated.values },
                 sheets,
@@ -861,6 +875,11 @@ fn eval_partitioned(
     let budget = budget_cells.unwrap_or(partition::DEFAULT_BUDGET_CELLS);
     let evaluated = run_partitioned(&store, &topo, budget, &layout)
         .map_err(|e| PyRuntimeError::new_err(format!("partitioned eval failed: {e}")))?;
+    // A spill the whole-file run would block on cannot be represented here,
+    // so the run falls back to it.
+    if evaluated.spill_detected {
+        return eval_whole(py, data);
+    }
 
     let out = PyDict::new(py);
     for (name, si, max_row, max_col) in sheet_extents(&topo, false) {
@@ -994,6 +1013,11 @@ fn _benchmark_rows(
                 let store = partition::DataStore::load(&mut topo);
                 let evaluated = run_partitioned(&store, &topo, budget_cells, &Layout::Chunks(plan))
                     .map_err(|e| PyRuntimeError::new_err(format!("partitioned eval failed: {e}")))?;
+                if evaluated.spill_detected {
+                    return Err(PyRuntimeError::new_err(
+                        "mode=\"scratch\" anchored a spill the whole-file run would block on",
+                    ));
+                }
                 let rows = RowIter {
                     source: RowSource::Partitioned { topo, store, values: evaluated.values },
                     sheets,
@@ -1022,6 +1046,11 @@ fn _benchmark_rows(
             let store = partition::DataStore::load(&mut topo);
             let evaluated = run_partitioned(&store, &topo, budget_cells, &Layout::Components)
                 .map_err(|e| PyRuntimeError::new_err(format!("partitioned eval failed: {e}")))?;
+            if evaluated.spill_detected {
+                return Err(PyRuntimeError::new_err(
+                    "mode=\"components\" anchored a spill the whole-file run would block on",
+                ));
+            }
             let rows = RowIter {
                 source: RowSource::Partitioned { topo, store, values: evaluated.values },
                 sheets,

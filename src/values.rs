@@ -115,6 +115,46 @@ pub fn decode_text(raw: &[u8]) -> String {
     }
 }
 
+/// Decode the `_xHHHH_` escapes Excel writes for characters that cannot live
+/// in element text.
+///
+/// A literal carriage return cannot appear in XML, so Excel writes `_x000D_`;
+/// reading must turn it back into `\r`, which is what the whole-file backend
+/// does. `_x005F_` is a literal underscore, and any sequence that does not
+/// match the pattern stays as it was. The decode runs on the assembled text
+/// of one element, after entity decoding, so an escape split across XML
+/// events still decodes.
+pub fn decode_escapes(s: &str) -> String {
+    if !s.contains("_x") {
+        return s.to_string();
+    }
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // `_xHHHH_` is seven characters: underscore, x, four hex digits,
+        // underscore.
+        if i + 7 <= bytes.len() && bytes[i] == b'_' && bytes[i + 1] == b'x' {
+            let hex = &bytes[i + 2..i + 6];
+            if hex.iter().all(|b| b.is_ascii_hexdigit()) && bytes[i + 6] == b'_' {
+                if let Some(ch) = std::str::from_utf8(hex)
+                    .ok()
+                    .and_then(|h| u32::from_str_radix(h, 16).ok())
+                    .and_then(char::from_u32)
+                {
+                    out.push(ch);
+                    i += 7;
+                    continue;
+                }
+            }
+        }
+        let ch = s[i..].chars().next().expect("i is at a char boundary");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 pub fn raw_attr(e: &BytesStart<'_>, key: &[u8]) -> Option<Vec<u8>> {
     e.attributes()
         .flatten()
@@ -154,12 +194,15 @@ pub fn read_text_element<R: std::io::BufRead>(rdr: &mut Reader<R>, closing: &[u8
                             _ => (),
                         }
                     }
-                    if preserve {
-                        out.push_str(&text);
+                    // Escapes decode after the whitespace trim: the loader
+                    // keeps a `\r` that an escape produces, and decoding
+                    // first would let the trim eat it.
+                    let text = if preserve {
+                        decode_escapes(&text)
                     } else {
-                        out.push_str(text.trim_matches([' ', '\t', '\r', '\n']));
-                    }
-                } else if name == closing {
+                        decode_escapes(text.trim_matches([' ', '\t', '\r', '\n']))
+                    };
+                    out.push_str(&text);                } else if name == closing {
                     depth += 1;
                 }
             }
@@ -383,8 +426,9 @@ impl<R: BufRead> Cells<R> {
                     b"v" => {
                         *in_v = false;
                         if let Some((r, c)) = *pos {
+                            let text = decode_escapes(v_text);
                             if let Some(val) =
-                                values.value(v_text, style.as_deref(), ty.as_deref())
+                                values.value(&text, style.as_deref(), ty.as_deref())
                             {
                                 return Some((r, c, val));
                             }
@@ -581,5 +625,25 @@ mod tests {
         assert!(!builtin_is_date(b"23"));
         // Matching is on the raw attribute, so a padded id is not a date.
         assert!(!builtin_is_date(b"014"));
+    }
+
+    #[test]
+    fn x_escapes_decode_like_the_whole_file_backend() {
+        // The shapes Excel actually writes for characters XML cannot hold.
+        assert_eq!(decode_escapes("1 , 2_x000D_"), "1 , 2\r");
+        assert_eq!(decode_escapes("a_x000A_b"), "a\nb");
+        assert_eq!(decode_escapes("a_x0009_b"), "a\tb");
+        // A literal underscore escapes as itself, and must not recurse. A
+        // bare `x000D_` without the leading `_x` is not an escape.
+        assert_eq!(decode_escapes("_x005F_"), "_");
+        assert_eq!(decode_escapes("_x005F__x000D_"), "_\r");
+        assert_eq!(decode_escapes("_x005F_x000D_"), "_x000D_");
+        // Anything that does not match the pattern stays as it was.
+        assert_eq!(decode_escapes("plain"), "plain");
+        assert_eq!(decode_escapes("_x000Z_"), "_x000Z_");
+        assert_eq!(decode_escapes("_x00_"), "_x00_");
+        assert_eq!(decode_escapes("_x000D"), "_x000D");
+        // Surrogates are not characters; the sequence stays literal.
+        assert_eq!(decode_escapes("_xD83D__xDE00_"), "_xD83D__xDE00_");
     }
 }
