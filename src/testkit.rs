@@ -20,15 +20,22 @@ pub fn xlsx_with_defined_names(sheets: &[(&str, &str)], defined_names: &str) -> 
 
     let mut wb = String::from(r#"<?xml version="1.0"?><workbook><sheets>"#);
     let mut rels = String::from(r#"<?xml version="1.0"?><Relationships>"#);
+    let mut types = String::from(
+        r#"<?xml version="1.0"?><Types><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>"#,
+    );
     for (i, (name, _)) in sheets.iter().enumerate() {
         let n = i + 1;
         wb.push_str(&format!(
             r#"<sheet name="{name}" sheetId="{n}" r:id="rId{n}"/>"#
         ));
         rels.push_str(&format!(
-            r#"<Relationship Id="rId{n}" Target="worksheets/sheet{n}.xml"/>"#
+            r#"<Relationship Id="rId{n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{n}.xml"/>"#
+        ));
+        types.push_str(&format!(
+            r#"<Override PartName="/xl/worksheets/sheet{n}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>"#
         ));
     }
+    types.push_str("</Types>");
     wb.push_str("</sheets>");
     if !defined_names.is_empty() {
         wb.push_str("<definedNames>");
@@ -38,6 +45,15 @@ pub fn xlsx_with_defined_names(sheets: &[(&str, &str)], defined_names: &str) -> 
     wb.push_str("</workbook>");
     rels.push_str("</Relationships>");
 
+    // The engine's loader (calamine) requires the package relationships and
+    // content types that this crate's own streaming reader never looks at.
+    w.start_file("_rels/.rels", opts).unwrap();
+    w.write_all(
+        br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+    )
+    .unwrap();
+    w.start_file("[Content_Types].xml", opts).unwrap();
+    w.write_all(types.as_bytes()).unwrap();
     w.start_file("xl/workbook.xml", opts).unwrap();
     w.write_all(wb.as_bytes()).unwrap();
     w.start_file("xl/_rels/workbook.xml.rels", opts).unwrap();

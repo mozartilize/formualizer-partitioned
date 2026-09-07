@@ -210,6 +210,14 @@ pub struct Sources {
     /// ones those are is only settled once the sheets have all been read, so
     /// `DataStore` drops them.
     pub values: Vec<Vec<(u32, u32, Val)>>,
+    /// Declared cells with no value, per sheet, in the order the part holds
+    /// them. A `<c r="G36" s="26" t="n"/>` holds no value but does
+    /// exist, and the whole-file loader keeps it as a blank. Only presence
+    /// is observable, and only to the calls that count blanks rather than
+    /// values, so the store keeps one of these only when a formula range
+    /// covers it (see `partition::sheet_blanks`). Formula cells are never in
+    /// here, even when they carry no cached value.
+    pub blanks: Vec<Vec<(u32, u32)>>,
     pub defined_names: Vec<DefinedName>,
     /// Sheets that exist only because a defined name points at them.
     ///
@@ -234,6 +242,12 @@ pub struct Sources {
     /// The scratch path moves a formula to another row. That move changes what
     /// these functions return, so it rejects these files.
     pub row_sensitive_fns: u64,
+    /// Aggregate calls whose criterion is a text literal that is not a
+    /// numeric comparison, in a `TEXT_CRITERIA_FNS` function. The engine
+    /// matches text criteria through text lanes whose content depends on
+    /// how the workbook was built, so two workbook builds cannot be made to
+    /// agree on the same cells, and these files keep the whole-file path.
+    pub text_criteria_ifs: u64,
     pub t_read_ms: f64,
 }
 
@@ -252,6 +266,10 @@ pub struct Topology {
     /// `DataStore` takes these; a workbook that falls back to a whole-file run
     /// must drop them, since it reads its own values.
     pub values: Vec<Vec<(u32, u32, Val)>>,
+    /// Declared cells with no value, per sheet. See `Sources::blanks`.
+    ///
+    /// `DataStore` keeps the ones a formula range covers, as blank entries.
+    pub blanks: Vec<Vec<(u32, u32)>>,
     /// References of each distinct formula, at its anchor position.
     pub ast_refs: Vec<Vec<RawRef>>,
     /// Supported fixed-address names that at least one formula uses.
@@ -297,6 +315,9 @@ pub struct Topology {
     /// Formulas that read their own cell position. See
     /// `Sources::row_sensitive_fns`.
     pub row_sensitive_fns: u64,
+    /// Aggregate calls with a text criterion. See
+    /// `Sources::text_criteria_ifs`.
+    pub text_criteria_ifs: u64,
     pub t_read_ms: f64,
     pub t_graph_ms: f64,
 }
@@ -786,6 +807,7 @@ pub fn read(data: &[u8]) -> Sources {
     let mut texts: Vec<Box<str>> = Vec::new();
     let mut anchors: Vec<(u32, u32)> = Vec::new();
     let mut values: Vec<Vec<(u32, u32, Val)>> = Vec::new();
+    let mut blanks: Vec<Vec<(u32, u32)>> = Vec::new();
     let mut dynamic_refs: u64 = 0;
     let mut parse_errors: u64 = 0;
     let mut first_parse_error = None;
@@ -793,6 +815,7 @@ pub fn read(data: &[u8]) -> Sources {
     let mut array_formulas: u64 = 0;
     let mut nondeterministic_fns: u64 = 0;
     let mut row_sensitive_fns: u64 = 0;
+    let mut text_criteria_ifs: u64 = 0;
 
     let cursor = Cursor::new(data);
     let mut zip = match ZipArchive::new(cursor) {
@@ -804,6 +827,7 @@ pub fn read(data: &[u8]) -> Sources {
                 texts,
                 anchors,
                 values,
+                blanks,
                 defined_names: Vec::new(),
                 name_only_sheets: Vec::new(),
                 dynamic_refs,
@@ -813,6 +837,7 @@ pub fn read(data: &[u8]) -> Sources {
                 array_formulas,
                 nondeterministic_fns,
                 row_sensitive_fns,
+                text_criteria_ifs,
                 t_read_ms: t0.elapsed().as_secs_f64() * 1000.0,
             }
         }
@@ -847,6 +872,7 @@ pub fn read(data: &[u8]) -> Sources {
                     rows_ascending: true,
                 });
                 values.push(Vec::new());
+                blanks.push(Vec::new());
                 continue;
             }
         };
@@ -872,6 +898,13 @@ pub fn read(data: &[u8]) -> Sources {
         let mut rows_ascending = true;
         let mut last_row = 0u32;
         let mut cur: Option<(u32, u32)> = None;
+        // Whether the current cell holds a formula, and whether a value was
+        // recorded for it. A declared cell with neither is a blank the
+        // whole-file loader keeps, so it is recorded in `blanks` when its
+        // element closes. A formula cell is never a blank, even when it
+        // carries no cached value.
+        let mut cur_is_formula = false;
+        let mut cur_pushed = false;
         let mut cur_inline = false;
         let mut cur_style: Option<Vec<u8>> = None;
         let mut cur_ty: Option<Vec<u8>> = None;
@@ -879,6 +912,7 @@ pub fn read(data: &[u8]) -> Sources {
         let mut v_text = String::new();
         let mut text_buf: Vec<u8> = Vec::new();
         let mut vals: Vec<(u32, u32, Val)> = Vec::new();
+        let mut sheet_blanks: Vec<(u32, u32)> = Vec::new();
         let mut in_f = false;
         let mut f_text = String::new();
         let mut f_shared = false;
@@ -901,6 +935,8 @@ pub fn read(data: &[u8]) -> Sources {
                     }
                     b"c" => {
                         cur = attr_value(&e, b"r").and_then(|r| parse_a1(&r));
+                        cur_is_formula = false;
+                        cur_pushed = false;
                         cur_inline = attr_value(&e, b"t").as_deref() == Some("inlineStr");
                         cur_style = raw_attr(&e, b"s");
                         cur_ty = raw_attr(&e, b"t");
@@ -934,9 +970,11 @@ pub fn read(data: &[u8]) -> Sources {
                                 let text = read_text_element(&mut rdr, b"is", &mut text_buf);
                                 if let (Some((r, c)), false) = (cur, text.is_empty()) {
                                     vals.push((r, c, Val::pack(LiteralValue::Text(text))));
+                                    cur_pushed = true;
                                 }
                             }
                             _ => {
+                                cur_is_formula = true;
                                 xml_formula_cells += 1;
                                 f_shared = attr_value(&e, b"t").as_deref() == Some("shared");
                                 if attr_value(&e, b"t").as_deref() == Some("array") {
@@ -949,6 +987,7 @@ pub fn read(data: &[u8]) -> Sources {
                         }
                     }
                     b"f" => {
+                        cur_is_formula = true;
                         f_shared = attr_value(&e, b"t").as_deref() == Some("shared");
                         if attr_value(&e, b"t").as_deref() == Some("array") {
                             array_formulas += 1;
@@ -976,12 +1015,18 @@ pub fn read(data: &[u8]) -> Sources {
                                 rows_ascending = false;
                             }
                             last_row = r;
+                            // A self-closing cell carries no children, so it
+                            // holds neither a value nor a formula.
+                            sheet_blanks.push((r, c));
                         }
                         cur = None;
                     }
                     // A self-closing <f t="shared" si="N"/> is a shared-formula
                     // member: it carries no text and never emits an End event.
                     b"f" => {
+                        if cur.is_some() {
+                            cur_is_formula = true;
+                        }
                         if let Some((r, c)) = cur {
                             xml_formula_cells += 1;
                             if attr_value(&e, b"t").as_deref() == Some("array") {
@@ -1013,6 +1058,18 @@ pub fn read(data: &[u8]) -> Sources {
                     }
                 }
                 Ok(Event::End(e)) => {
+                    if e.name().as_ref() == b"c" {
+                        // A declared cell with no value and no formula is a
+                        // blank the whole-file loader keeps. The self-closing
+                        // form is recorded where it is seen; this closes the
+                        // Start/End form.
+                        if let Some((r, c)) = cur {
+                            if !cur_is_formula && !cur_pushed {
+                                sheet_blanks.push((r, c));
+                            }
+                        }
+                        cur = None;
+                    }
                     if e.name().as_ref() == b"v" {
                         in_v = false;
                         if let Some((r, c)) = cur {
@@ -1022,6 +1079,7 @@ pub fn read(data: &[u8]) -> Sources {
                                 cur_ty.as_deref(),
                             ) {
                                 vals.push((r, c, Val::pack(val)));
+                                cur_pushed = true;
                             }
                         }
                     }
@@ -1070,6 +1128,7 @@ pub fn read(data: &[u8]) -> Sources {
                                                     &mut dynamic_refs,
                                                     &mut row_sensitive_fns,
                                                     &mut nondeterministic_fns,
+                                                    &mut text_criteria_ifs,
                                                 );
                                                 let idx = texts.len() as u32;
                                                 texts.push(src.into_boxed_str());
@@ -1147,6 +1206,7 @@ pub fn read(data: &[u8]) -> Sources {
             rows_ascending,
         });
         values.push(vals);
+        blanks.push(sheet_blanks);
     }
 
     Sources {
@@ -1155,6 +1215,7 @@ pub fn read(data: &[u8]) -> Sources {
         texts,
         anchors,
         values,
+        blanks,
         defined_names,
         name_only_sheets,
         dynamic_refs,
@@ -1164,6 +1225,7 @@ pub fn read(data: &[u8]) -> Sources {
         array_formulas,
         nondeterministic_fns,
         row_sensitive_fns,
+        text_criteria_ifs,
         t_read_ms: t0.elapsed().as_secs_f64() * 1000.0,
     }
 }
@@ -1327,6 +1389,20 @@ const NONDETERMINISTIC_FNS: [&str; 4] = ["RAND", "RANDARRAY", "RANDBETWEEN", "IN
 /// scan the table. See `Topology::lookup_work`.
 const LOOKUP_FNS: [&str; 6] = ["VLOOKUP", "HLOOKUP", "LOOKUP", "MATCH", "XLOOKUP", "XMATCH"];
 
+/// Aggregate calls whose criterion matching cannot be partitioned.
+///
+/// A text criterion such as `COUNTIF(range,"1")` or `SUMIF(range,"")`
+/// matches through text lanes whose content depends on how the workbook was
+/// built: the same cells answer differently in a loader-built workbook and
+/// in an incrementally-built one (bulk vs `set_value` order, declared
+/// dimensions, styles). The two paths cannot be made to agree, so any
+/// criterion that is not a numeric comparison keeps the whole-file path.
+/// A criterion such as `">0"` parses to a numeric predicate and is safe.
+/// `COUNTBLANK` counts nulls directly without the text-lane mask and is
+/// not affected.
+const TEXT_CRITERIA_FNS: [&str; 6] =
+    ["COUNTIF", "COUNTIFS", "SUMIF", "SUMIFS", "AVERAGEIF", "AVERAGEIFS"];
+
 /// Repeated aggregate and lookup formulas usually read the same large range.
 /// Keep this cache bounded so row-relative ranges cannot make memory scale with
 /// the number of formula cells.
@@ -1345,11 +1421,14 @@ fn major_axis_range(index: &[(u32, u32)], lo: u32, hi: u32) -> &[(u32, u32)] {
 /// `dynamic` counts references that only exist at evaluation time.
 /// `row_sensitive` counts calls whose result depends on the formula position.
 /// `nondeterministic` counts calls that two engines cannot be made to agree on.
+/// `text_criteria` counts aggregate calls whose criterion matching two
+/// workbook builds cannot be made to agree on.
 fn classify(
     node: &ASTNode,
     dynamic: &mut u64,
     row_sensitive: &mut u64,
     nondeterministic: &mut u64,
+    text_criteria: &mut u64,
 ) {
     match &node.node_type {
         ASTNodeType::Function { name, args } => {
@@ -1362,30 +1441,84 @@ fn classify(
             if NONDETERMINISTIC_FNS.iter().any(|d| name.eq_ignore_ascii_case(d)) {
                 *nondeterministic += 1;
             }
+            if TEXT_CRITERIA_FNS.iter().any(|d| name.eq_ignore_ascii_case(d))
+                && has_unsafe_criteria_text(node)
+            {
+                *text_criteria += 1;
+            }
             for a in args {
-                classify(a, dynamic, row_sensitive, nondeterministic);
+                classify(a, dynamic, row_sensitive, nondeterministic, text_criteria);
             }
         }
-        ASTNodeType::UnaryOp { expr, .. } => classify(expr, dynamic, row_sensitive, nondeterministic),
+        ASTNodeType::UnaryOp { expr, .. } => {
+            classify(expr, dynamic, row_sensitive, nondeterministic, text_criteria)
+        }
         ASTNodeType::BinaryOp { left, right, .. } => {
-            classify(left, dynamic, row_sensitive, nondeterministic);
-            classify(right, dynamic, row_sensitive, nondeterministic);
+            classify(left, dynamic, row_sensitive, nondeterministic, text_criteria);
+            classify(right, dynamic, row_sensitive, nondeterministic, text_criteria);
         }
         ASTNodeType::Call { callee, args } => {
-            classify(callee, dynamic, row_sensitive, nondeterministic);
+            classify(callee, dynamic, row_sensitive, nondeterministic, text_criteria);
             for a in args {
-                classify(a, dynamic, row_sensitive, nondeterministic);
+                classify(a, dynamic, row_sensitive, nondeterministic, text_criteria);
             }
         }
         ASTNodeType::Array(rows) => {
             for row in rows {
                 for a in row {
-                    classify(a, dynamic, row_sensitive, nondeterministic);
+                    classify(a, dynamic, row_sensitive, nondeterministic, text_criteria);
                 }
             }
         }
         _ => {}
     }
+}
+
+/// Whether a call subtree holds a criterion the two paths cannot agree on.
+///
+/// A text literal is unsafe unless it is a numeric comparison such as
+/// `">0"`. A computed criterion such as `IF(A1="x","",">0")` can answer a
+/// text at evaluation time, so any text literal anywhere in the subtree
+/// counts; a text outside the call is a value, not a criterion, and is
+/// correctly ignored.
+fn has_unsafe_criteria_text(node: &ASTNode) -> bool {
+    match &node.node_type {
+        ASTNodeType::Literal(LiteralValue::Text(s)) => !is_numeric_comparison(s),
+        ASTNodeType::UnaryOp { expr, .. } => has_unsafe_criteria_text(expr),
+        ASTNodeType::BinaryOp { left, right, .. } => {
+            has_unsafe_criteria_text(left) || has_unsafe_criteria_text(right)
+        }
+        ASTNodeType::Function { args, .. } => args.iter().any(has_unsafe_criteria_text),
+        ASTNodeType::Call { callee, args } => {
+            has_unsafe_criteria_text(callee) || args.iter().any(has_unsafe_criteria_text)
+        }
+        ASTNodeType::Array(rows) => rows.iter().flatten().any(has_unsafe_criteria_text),
+        _ => false,
+    }
+}
+
+/// Whether a criteria text is a comparison against a number, such as
+/// `">0"` or `"<=5.5"`. Numeric comparisons take the numeric predicate
+/// path, which agrees across workbook builds; every other text criterion
+/// takes the build-dependent text-lane path.
+fn is_numeric_comparison(s: &str) -> bool {
+    let t = s.trim();
+    let rhs = if let Some(r) = t.strip_prefix(">=") {
+        r
+    } else if let Some(r) = t.strip_prefix("<=") {
+        r
+    } else if let Some(r) = t.strip_prefix("<>") {
+        r
+    } else if let Some(r) = t.strip_prefix("=") {
+        r
+    } else if let Some(r) = t.strip_prefix(">") {
+        r
+    } else if let Some(r) = t.strip_prefix("<") {
+        r
+    } else {
+        return false;
+    };
+    rhs.trim().parse::<f64>().is_ok()
 }
 
 fn resolve_defined_name(
@@ -1529,6 +1662,7 @@ pub fn build_from(src: Sources) -> Topology {
         texts,
         anchors,
         values,
+        blanks,
         defined_names,
         name_only_sheets,
         dynamic_refs,
@@ -1538,6 +1672,7 @@ pub fn build_from(src: Sources) -> Topology {
         array_formulas,
         nondeterministic_fns,
         row_sensitive_fns,
+        text_criteria_ifs,
         t_read_ms,
     } = src;
 
@@ -1883,6 +2018,7 @@ pub fn build_from(src: Sources) -> Topology {
         texts,
         anchors,
         values,
+        blanks,
         ast_refs,
         static_names,
         named_refs,
@@ -1905,6 +2041,7 @@ pub fn build_from(src: Sources) -> Topology {
         xml_formula_cells,
         nondeterministic_fns,
         row_sensitive_fns,
+        text_criteria_ifs,
         t_read_ms,
         t_graph_ms: t1.elapsed().as_secs_f64() * 1000.0,
     }
@@ -2034,6 +2171,30 @@ mod tests {
         let t = build(&data);
         assert_eq!(t.xml_formula_cells, 5);
         assert_eq!(t.cells.len(), 3);
+    }
+
+    #[test]
+    fn valueless_declared_cells_are_recorded_as_blanks() {
+        // Self-closing and Start/End forms both record. Valued cells and
+        // formula cells, with or without a cached value, never do: a
+        // formula cell is not a blank even when its `<v>` is missing.
+        let sheet = format!(
+            "{}{}{}{}{}",
+            r#"<c r="A1"/>"#,
+            r#"<c r="A2" s="5"></c>"#,
+            cell_v("A3", "7"),
+            r#"<c r="A4"><f>B4</f></c>"#,
+            cell_f("A5", "B5"),
+        );
+        let src = read(&xlsx(&[("S", &sheet)]));
+        assert_eq!(src.blanks.len(), 1);
+        assert_eq!(src.blanks[0], vec![(1, 1), (2, 1)]);
+        assert!(src.values[0].iter().any(|&(r, c, _)| (r, c) == (3, 1)));
+        assert!(
+            !src.values[0].iter().any(|&(r, c, _)| (r, c) == (1, 1) || (r, c) == (2, 1)),
+            "blanks carry no value: {:?}",
+            src.values[0]
+        );
     }
 
     #[test]

@@ -193,11 +193,18 @@ pub struct Values {
 /// never use. At one entry per cell that dominates the store. The common scalar
 /// cases are held inline and anything else is boxed, so no value is
 /// reinterpreted and dates round-trip exactly as the backend produces them.
+#[derive(Debug)]
 pub enum Val {
     Int(i64),
     Number(f64),
     Boolean(bool),
     Text(Box<str>),
+    /// A declared cell with no value, kept only when a formula range covers
+    /// it (see `Sources::blanks`). Blank presence is observable: blank-aware
+    /// calls such as `COUNTIF(range,"")` count it, so dropping it changes
+    /// results. It unpacks to `Empty`, which every other call skips exactly
+    /// as it skips a missing cell.
+    Empty,
     Other(Box<LiteralValue>),
 }
 
@@ -208,6 +215,7 @@ impl Val {
             LiteralValue::Number(n) => Val::Number(n),
             LiteralValue::Boolean(b) => Val::Boolean(b),
             LiteralValue::Text(s) => Val::Text(s.into_boxed_str()),
+            LiteralValue::Empty => Val::Empty,
             other => Val::Other(Box::new(other)),
         }
     }
@@ -218,6 +226,7 @@ impl Val {
             Val::Number(n) => LiteralValue::Number(*n),
             Val::Boolean(b) => LiteralValue::Boolean(*b),
             Val::Text(s) => LiteralValue::Text(s.to_string()),
+            Val::Empty => LiteralValue::Empty,
             Val::Other(v) => (**v).clone(),
         }
     }

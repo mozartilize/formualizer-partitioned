@@ -168,6 +168,40 @@ impl SheetData {
     }
 }
 
+/// Valueless declared cells of one sheet that a formula range covers.
+///
+/// Blank presence is observable to blank-counting calls (`COUNTBLANK`, a
+/// `COUNTIF`-family call with a `""` criterion), so the store keeps these
+/// as blank entries. The extra entries are bounded by referenced area: a
+/// blank outside every component range changes no result and is dropped,
+/// which is what keeps style-only tail areas out of the store.
+fn sheet_blanks(topo: &Topology, si: u16) -> Vec<(u32, u32)> {
+    let blanks = match topo.blanks.get(si as usize) {
+        Some(b) if !b.is_empty() => b,
+        _ => return Vec::new(),
+    };
+    let mut ranges: Vec<(u32, u32, u32, u32)> = Vec::new();
+    for comp in &topo.comp_refs {
+        for &(s, r0, c0, r1, c1) in comp {
+            if s == si {
+                ranges.push((r0, c0, r1, c1));
+            }
+        }
+    }
+    if ranges.is_empty() {
+        return Vec::new();
+    }
+    blanks
+        .iter()
+        .copied()
+        .filter(|&(r, c)| {
+            ranges
+                .iter()
+                .any(|&(r0, c0, r1, c1)| r0 <= r && r <= r1 && c0 <= c && c <= c1)
+        })
+        .collect()
+}
+
 impl DataStore {
     pub fn get(&self, sheet: u16, row: u32, col: u32) -> Option<LiteralValue> {
         Some(self.sheets.get(sheet as usize)?.get(row, col)?.unpack())
@@ -214,7 +248,6 @@ impl DataStore {
     pub fn load(topo: &mut Topology) -> Self {
         DataStore::load_without(topo, None)
     }
-
     /// Take the values of every sheet except one, which stays empty.
     ///
     /// The streaming path reads the values of its formula sheet row by row, so
@@ -229,7 +262,13 @@ impl DataStore {
                 sheets.push(SheetData::default());
                 continue;
             }
-            sheets.push(SheetData::build(Self::keep(topo, si as u16, cells)));
+            let mut cells = Self::keep(topo, si as u16, cells);
+            cells.extend(
+                sheet_blanks(topo, si as u16)
+                    .into_iter()
+                    .map(|(r, c)| (r, c, Val::Empty)),
+            );
+            sheets.push(SheetData::build(cells));
         }
         DataStore { sheets }
     }
@@ -248,7 +287,13 @@ impl DataStore {
         for (si, (_name, path)) in parts.iter().enumerate() {
             let mut cells: Vec<(u32, u32, Val)> = Vec::new();
             decoder.read_sheet(&mut zip, path, |r, c, v| cells.push((r, c, Val::pack(v))));
-            sheets.push(SheetData::build(Self::keep(topo, si as u16, cells)));
+            let mut cells = Self::keep(topo, si as u16, cells);
+            cells.extend(
+                sheet_blanks(topo, si as u16)
+                    .into_iter()
+                    .map(|(r, c)| (r, c, Val::Empty)),
+            );
+            sheets.push(SheetData::build(cells));
         }
         Ok(DataStore { sheets })
     }
@@ -1457,6 +1502,9 @@ mod tests {
     use super::*;
     use formualizer::parse::parser::parse;
     use formualizer::parse::pretty::canonical_formula;
+    use formualizer::workbook::backends::CalamineAdapter;
+    use formualizer::workbook::traits::SpreadsheetReader;
+    use formualizer::workbook::LoadStrategy;
     use crate::testkit::{cell_f, cell_v, xlsx, xlsx_with_defined_names};
 
     fn shifted(formula: &str, dr: i64, dc: i64) -> String {
@@ -1550,6 +1598,8 @@ mod tests {
             comp_of: Vec::new(),
             comp_cells: extents.iter().map(|&e| vec![0u32; e as usize]).collect(),
             comp_refs: vec![Vec::new(); extents.len()],
+            blanks: Vec::new(),
+            text_criteria_ifs: 0,
             comp_extent: extents.to_vec(),
             index: HashMap::new(),
             full_extent_cells: 0,
@@ -2072,6 +2122,43 @@ mod tests {
             ),
         ));
         assert!(t.name_only_sheets.is_empty(), "{:?}", t.name_only_sheets);
+    }
+
+    /// A declared cell with no value counts in `COUNTBLANK`, so the store
+    /// keeps the blanks a formula range covers and the mini-workbook declares
+    /// them too. The oracle loads through the engine like a whole-file run
+    /// does. (`COUNTIF` with an `""` criterion is gated to the whole-file
+    /// path instead: `""` matching depends on how the workbook was built.
+    /// See `text-criteria aggregates` and the `lib` verdict test.)
+    #[test]
+    fn blank_cells_count_in_a_partitioned_countblank() {
+        let mut sheet = String::new();
+        for r in 2..=35u32 {
+            sheet.push_str(&cell_v(&format!("G{r}"), &r.to_string()));
+        }
+        sheet.push_str(r#"<c r="G36" s="26" t="n"/>"#);
+        sheet.push_str(r#"<c r="G37" s="26" t="n"/>"#);
+        // `COUNTBLANK` is not folded, so it goes through the store and the
+        // batch workbook.
+        sheet.push_str(&cell_f("G44", "COUNTBLANK(G$2:G$37)"));
+        let data = xlsx(&[("S", &sheet)]);
+        let mut topo = topo_of(&data);
+        assert_eq!(topo.cells.len(), 1);
+        let store = DataStore::load(&mut topo);
+        // The range the formula reads keeps its blanks.
+        assert_eq!(store.get(0, 36, 7), Some(LiteralValue::Empty));
+        assert_eq!(store.get(0, 37, 7), Some(LiteralValue::Empty));
+        let result = run(&store, &topo, DEFAULT_BUDGET_CELLS).unwrap();
+        let adapter = <CalamineAdapter as SpreadsheetReader>::open_bytes(data).unwrap();
+        let mut whole = Workbook::from_reader(
+            adapter,
+            LoadStrategy::EagerAll,
+            crate::clock::pin(WorkbookConfig::interactive()),
+        )
+        .unwrap();
+        whole.evaluate_all().unwrap();
+        assert_eq!(result.values[0], LiteralValue::Number(2.0));
+        assert_eq!(Some(result.values[0].clone()), whole.get_value("S", 44, 7));
     }
 
     /// A `#REF!` literal carries no dependency edge, so a formula holding one
