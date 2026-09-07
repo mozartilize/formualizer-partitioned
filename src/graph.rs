@@ -248,6 +248,11 @@ pub struct Sources {
     /// how the workbook was built, so two workbook builds cannot be made to
     /// agree on the same cells, and these files keep the whole-file path.
     pub text_criteria_ifs: u64,
+    /// Whether each distinct formula source can produce a spilled array.
+    ///
+    /// See `array_capable_ast`. The chunk layout refuses these templates;
+    /// the components layout inspects the ones a batch places.
+    pub array_capable: Vec<bool>,
     pub t_read_ms: f64,
 }
 
@@ -318,6 +323,9 @@ pub struct Topology {
     /// Aggregate calls with a text criterion. See
     /// `Sources::text_criteria_ifs`.
     pub text_criteria_ifs: u64,
+    /// Whether each distinct formula source can produce a spilled array.
+    /// See `Sources::array_capable`.
+    pub array_capable: Vec<bool>,
     pub t_read_ms: f64,
     pub t_graph_ms: f64,
 }
@@ -816,6 +824,7 @@ pub fn read(data: &[u8]) -> Sources {
     let mut nondeterministic_fns: u64 = 0;
     let mut row_sensitive_fns: u64 = 0;
     let mut text_criteria_ifs: u64 = 0;
+    let mut array_capable: Vec<bool> = Vec::new();
 
     let cursor = Cursor::new(data);
     let mut zip = match ZipArchive::new(cursor) {
@@ -838,6 +847,7 @@ pub fn read(data: &[u8]) -> Sources {
                 nondeterministic_fns,
                 row_sensitive_fns,
                 text_criteria_ifs,
+                array_capable,
                 t_read_ms: t0.elapsed().as_secs_f64() * 1000.0,
             }
         }
@@ -1130,6 +1140,7 @@ pub fn read(data: &[u8]) -> Sources {
                                                     &mut nondeterministic_fns,
                                                     &mut text_criteria_ifs,
                                                 );
+                                                array_capable.push(array_capable_ast(&ast));
                                                 let idx = texts.len() as u32;
                                                 texts.push(src.into_boxed_str());
                                                 anchors.push((r, c));
@@ -1226,6 +1237,7 @@ pub fn read(data: &[u8]) -> Sources {
         nondeterministic_fns,
         row_sensitive_fns,
         text_criteria_ifs,
+        array_capable,
         t_read_ms: t0.elapsed().as_secs_f64() * 1000.0,
     }
 }
@@ -1402,6 +1414,68 @@ const LOOKUP_FNS: [&str; 6] = ["VLOOKUP", "HLOOKUP", "LOOKUP", "MATCH", "XLOOKUP
 /// not affected.
 const TEXT_CRITERIA_FNS: [&str; 6] =
     ["COUNTIF", "COUNTIFS", "SUMIF", "SUMIFS", "AVERAGEIF", "AVERAGEIFS"];
+
+/// Functions whose result can be an array even when every argument is a
+/// scalar, plus lookup-style calls that spill when an index argument
+/// evaluates to zero (`INDEX(range,0)`).
+const ARRAY_FNS: [&str; 23] = [
+    "INDEX", "XLOOKUP", "SEQUENCE", "MUNIT", "RANDARRAY", "TEXTSPLIT", "SORT", "SORTBY",
+    "UNIQUE", "FILTER", "TRANSPOSE", "MAKEARRAY", "CHOOSECOLS", "CHOOSEROWS", "TOCOL",
+    "TOROW", "DROP", "TAKE", "EXPAND", "VSTACK", "HSTACK", "WRAPROWS", "WRAPCOLS",
+];
+
+/// Functions that reduce their arguments to a scalar, so an array inside
+/// them cannot reach the result. `IF` and `CHOOSE` are deliberately absent:
+/// they pass a branch through. Unknown functions are treated as passing
+/// their arguments through, which keeps the screen free of false
+/// negatives.
+const REDUCING_FNS: [&str; 46] = [
+    "SUM", "COUNT", "COUNTA", "COUNTBLANK", "MIN", "MAX", "MINA", "MAXA", "AVERAGE",
+    "AVERAGEA", "MEDIAN", "MODE", "PRODUCT", "SUMPRODUCT", "SUMIF", "SUMIFS", "COUNTIF",
+    "COUNTIFS", "AVERAGEIF", "AVERAGEIFS", "MINIFS", "MAXIFS", "VLOOKUP", "HLOOKUP",
+    "LOOKUP", "MATCH", "XMATCH", "LARGE", "SMALL", "STDEV", "STDEVA", "VAR", "VARA",
+    "ABS", "INT", "MOD", "ROUND", "SQRT", "TEXT", "LEFT", "RIGHT", "MID", "LEN",
+    "CONCAT", "CONCATENATE", "ISNUMBER",
+];
+
+/// Whether a formula source can produce a spilled array.
+///
+/// The screen is a superset of the spilling shapes, so it never misses one:
+/// a result is an array only when a range, a named range or an array
+/// literal flows to it, or when one of `ARRAY_FNS` produces it from
+/// scalars. A range inside `REDUCING_FNS` is consumed and cannot reach the
+/// result, so the common `SUM(A1:A3)` shape is not flagged. It
+/// over-approximates elsewhere: `INDEX(A1,1)` is flagged although it
+/// returns a scalar, and an unknown function is treated as passing its
+/// arguments through. A false positive costs only an inspection of the
+/// anchors a batch places; a false negative would make a spill go
+/// unnoticed.
+pub fn array_capable_ast(node: &ASTNode) -> bool {
+    match &node.node_type {
+        ASTNodeType::Reference { reference, .. } => matches!(
+            reference,
+            ReferenceType::Range { .. } | ReferenceType::NamedRange(_)
+        ),
+        ASTNodeType::UnaryOp { expr, .. } => array_capable_ast(expr),
+        ASTNodeType::BinaryOp { left, right, .. } => {
+            array_capable_ast(left) || array_capable_ast(right)
+        }
+        ASTNodeType::Function { name, args } => {
+            if ARRAY_FNS.iter().any(|f| name.eq_ignore_ascii_case(f)) {
+                return true;
+            }
+            if REDUCING_FNS.iter().any(|f| name.eq_ignore_ascii_case(f)) {
+                return false;
+            }
+            args.iter().any(array_capable_ast)
+        }
+        ASTNodeType::Call { callee, args } => {
+            array_capable_ast(callee) || args.iter().any(array_capable_ast)
+        }
+        ASTNodeType::Array(_) => true,
+        _ => false,
+    }
+}
 
 /// Repeated aggregate and lookup formulas usually read the same large range.
 /// Keep this cache bounded so row-relative ranges cannot make memory scale with
@@ -1673,6 +1747,7 @@ pub fn build_from(src: Sources) -> Topology {
         nondeterministic_fns,
         row_sensitive_fns,
         text_criteria_ifs,
+        array_capable,
         t_read_ms,
     } = src;
 
@@ -2042,6 +2117,7 @@ pub fn build_from(src: Sources) -> Topology {
         nondeterministic_fns,
         row_sensitive_fns,
         text_criteria_ifs,
+        array_capable,
         t_read_ms,
         t_graph_ms: t1.elapsed().as_secs_f64() * 1000.0,
     }
@@ -2123,6 +2199,30 @@ pub fn analyze(data: &[u8]) -> Analysis {
 mod tests {
     use super::*;
     use crate::testkit::{cell_f, cell_v, xlsx, xlsx_with_defined_names};
+
+    #[test]
+    fn array_capable_screen_covers_every_spilling_shape() {
+        for formula in [
+            "=A1:A3",
+            "=A1:A3+0",
+            "=INDEX($A$1:$A$3,0)",
+            "=INDEX(A1,0)",
+            "=SEQUENCE(3)",
+            "=IF(A1>0,{1,2},3)",
+            "=NamedRange",
+        ] {
+            assert!(
+                array_capable_ast(&parse(formula).unwrap()),
+                "{formula} must be flagged"
+            );
+        }
+        for formula in ["=A1+1", "=SUM(A1:A3)", "=VLOOKUP(A1,B1:C5,2,0)", "=IF(A1>0,1,2)"] {
+            assert!(
+                !array_capable_ast(&parse(formula).unwrap()),
+                "{formula} must not be flagged"
+            );
+        }
+    }
 
     #[test]
     fn formula_cdata_is_concatenated_without_entity_decoding() {

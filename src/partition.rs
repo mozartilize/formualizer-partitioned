@@ -76,7 +76,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use formualizer::common::value::LiteralValue;
-use formualizer::common::RangeAddress;
+use formualizer::common::{CellAddress, RangeAddress};
+use formualizer::eval::engine::inspect::{SnapshotOptions, SpillRole};
 use formualizer::parse::parser::{parse, ASTNode, ASTNodeType, ReferenceType};
 use formualizer::workbook::{NamedRangeScope, Workbook, WorkbookConfig};
 
@@ -451,16 +452,17 @@ pub fn plan_batches(topo: &Topology, budget_cells: u64) -> Vec<Vec<u32>> {
     batches
 }
 
+#[derive(Debug)]
 pub struct Evaluated {
     /// Computed value per formula cell, indexed as in `Topology::cells`.
-    /// Only valid when `spill_detected` is false.
     pub values: Vec<LiteralValue>,
     pub n_batches: usize,
     pub biggest_batch_cells: u64,
-    /// A placed formula spilled an array into cells the batch never wrote.
-    /// The whole-file run may block where the batch stayed free, so the
-    /// values are discarded and the caller falls back to it.
-    pub spill_detected: bool,
+    /// Cells a spilled array wrote that no formula reads. The whole-file
+    /// run spills the same cells, so row and grid output serves these in
+    /// place of the store. Anchors are formula cells and come from
+    /// `values`.
+    pub spilled: Vec<(u16, u32, u32, LiteralValue)>,
 }
 
 /// Evaluate every component, one batch of workbooks at a time.
@@ -472,7 +474,9 @@ pub fn run(
     let batches = plan_batches(topo, budget_cells);
     let mut values = vec![LiteralValue::Empty; topo.cells.len()];
     let mut biggest_batch_cells = 0u64;
-    let mut spill_detected = false;
+    let mut spilled: Vec<(u16, u32, u32, LiteralValue)> = Vec::new();
+    // Extents every resolved batch committed, for the overlap guard.
+    let mut all_extents: Vec<(u16, RangeAddress)> = Vec::new();
 
     for batch in &batches {
         let mut cells: Vec<u32> = Vec::new();
@@ -495,121 +499,88 @@ pub fn run(
             cells.len() as u64 + ranges.iter().map(range_area).sum::<u64>();
         biggest_batch_cells = biggest_batch_cells.max(batch_cells);
 
-        let mut wb = Workbook::new_with_config(crate::clock::pin(WorkbookConfig::ephemeral()));
-        let mut added: HashSet<u16> = HashSet::new();
-        for &i in &cells {
-            let s = topo.cells[i as usize].sheet;
-            if added.insert(s) {
-                wb.add_sheet(&topo.sheets[s as usize].name)
-                    .map_err(|e| e.to_string())?;
-            }
-        }
-        for &(s, ..) in &ranges {
-            if added.insert(s) {
-                wb.add_sheet(&topo.sheets[s as usize].name)
-                    .map_err(|e| e.to_string())?;
-            }
-        }
+        // The screen is a superset of the spilling shapes, so a batch with no
+        // flagged template cannot spill and pays nothing for the check. A
+        // flagged template costs one engine inspection per anchor (about two
+        // microseconds each).
+        let candidates: Vec<u32> = cells
+            .iter()
+            .copied()
+            .filter(|&i| {
+                topo.array_capable
+                    .get(topo.cells[i as usize].ast as usize)
+                    .copied()
+                    .unwrap_or(false)
+            })
+            .collect();
 
-        let mut written = copy_inputs(store, topo, &ranges, &mut wb)?;
-        for &i in &cells {
-            let fc = &topo.cells[i as usize];
-            written.insert((fc.sheet, fc.row, fc.col));
-        }
-        // Workbook-scoped names the formulas use. Their targets were copied
-        // as inputs above, and formula cells inside a target joined the same
-        // component through the dependency union, so they are placed below
-        // rather than read stale. Sheet-scoped names keep the whole-file
-        // fallback (see `partition_verdict`).
-        {
-            let mut defined: HashSet<&str> = HashSet::new();
-            for name in topo.static_names.iter().filter(|n| n.scope == NameScope::Workbook) {
-                if !defined.insert(name.name.as_ref()) {
-                    continue;
-                }
-                let (s, ..) = name.target;
-                if added.insert(s) {
-                    wb.add_sheet(&topo.sheets[s as usize].name)
-                        .map_err(|e| e.to_string())?;
-                }
-                define_static_name(&mut wb, topo, name)?;
-            }
-        }
-
-        // Formulas are parsed here rather than kept in the topology, so no run
-        // holds more parsed trees than one batch needs. A shared formula is
-        // parsed once for the batch and shifted per member. The units follow
-        // component boundaries, which is what bulk ingest needs.
-        let mut parsed: HashMap<u32, ASTNode> = HashMap::new();
-        let mut units: Vec<Vec<(u16, u32, u32, ASTNode)>> = Vec::new();
-        let mut unit: Vec<(u16, u32, u32, ASTNode)> = Vec::new();
-        for &c in batch {
-            let comp = &topo.comp_cells[c as usize];
-            let text_bytes: usize = comp
-                .iter()
-                .map(|&i| topo.texts[topo.cells[i as usize].ast as usize].len())
-                .sum();
-            if text_bytes > COMPONENT_TEXT_BUDGET {
-                // Placed straight into the graph, so only one tree of this
-                // component is alive at a time.
-                for &i in comp {
-                    let fc = &topo.cells[i as usize];
-                    if !parsed.contains_key(&fc.ast) {
-                        let ast = parse(&topo.texts[fc.ast as usize]).map_err(|e| e.to_string())?;
-                        parsed.insert(fc.ast, ast);
-                    }
-                    let ast = shift_ast(&parsed[&fc.ast], fc.dr, fc.dc);
-                    wb.engine_mut()
-                        .set_cell_formula(
-                            &topo.sheets[fc.sheet as usize].name,
-                            fc.row,
-                            fc.col,
-                            ast,
-                        )
-                        .map_err(|e| e.to_string())?;
-                }
-                continue;
-            }
-            for &i in comp {
-                let fc = &topo.cells[i as usize];
-                if !parsed.contains_key(&fc.ast) {
-                    let ast = parse(&topo.texts[fc.ast as usize]).map_err(|e| e.to_string())?;
-                    parsed.insert(fc.ast, ast);
-                }
-                let ast = shift_ast(&parsed[&fc.ast], fc.dr, fc.dc);
-                unit.push((fc.sheet, fc.row, fc.col, ast));
-            }
-            if unit.len() >= INGEST_CHUNK {
-                units.push(std::mem::take(&mut unit));
-            }
-        }
-        if !unit.is_empty() {
-            units.push(unit);
-        }
-        drop(parsed);
-        place_formulas(&mut wb, topo, units)?;
-
+        let mut wb = build_batch_workbook(store, topo, batch, &cells, &ranges, &[])?;
         wb.evaluate_all().map_err(|e| e.to_string())?;
-
-        // A spill the whole-file run would block on is invisible here until
-        // it is looked for: the anchor reads back the first element either
-        // way. The spilled cells give it away, so the batch falls back.
-        if anchored_spill(&wb, topo, &cells, &written) {
-            spill_detected = true;
-            break;
+        let extents = spilled_anchors(&wb, topo, &candidates)?;
+        if extents.is_empty() {
+            read_values(&wb, topo, &cells, &mut values)?;
+            continue;
         }
 
-        for &i in &cells {
-            let fc = &topo.cells[i as usize];
-            match wb.get_value(&topo.sheets[fc.sheet as usize].name, fc.row, fc.col) {
-                Some(v) => values[i as usize] = v,
-                // A placed formula with no value is a lost result, not a
-                // blank: report it instead of silently writing `Empty`.
-                None => {
-                    return Err(format!(
-                        "no value for formula cell {} r{}c{}",
-                        topo.sheets[fc.sheet as usize].name, fc.row, fc.col
-                    ));
+        // Whole-file equivalence guards, checked on pass-1 extents: the
+        // extents the whole run would spill into. A footprint that covers
+        // a formula cell of another batch makes the whole run fail its
+        // evaluation outright (BlockedByFormula) where a seeded batch
+        // would return a clean #SPILL!, and footprints across batches
+        // resolve in source order, which a partitioned run cannot replay.
+        let batch_set: HashSet<u32> = cells.iter().copied().collect();
+        for (cell_i, extent) in &extents {
+            let anchor = &topo.cells[*cell_i as usize];
+            for r in extent.start_row..=extent.end_row {
+                for c in extent.start_col..=extent.end_col {
+                    if (r, c) != (anchor.row, anchor.col)
+                        && topo.index.contains_key(&(anchor.sheet, r, c))
+                        && !batch_set.contains(&topo.index[&(anchor.sheet, r, c)])
+                    {
+                        return Err(
+                            "a spill footprint covers a formula cell, which makes the whole-file run fail"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            if all_extents.iter().any(|(sheet, e)| {
+                *sheet == anchor.sheet
+                    && e.start_row <= extent.end_row
+                    && extent.start_row <= e.end_row
+                    && e.start_col <= extent.end_col
+                    && extent.start_col <= e.end_col
+            }) {
+                return Err(
+                    "spill footprints overlap, which the whole-file run resolves in source order"
+                        .to_string(),
+                );
+            }
+            all_extents.push((anchor.sheet, extent.clone()));
+        }
+
+        // A spill anchored. The mini-workbook copies only the dependency
+        // closure, so a blocker that occupies a cell no formula reads was
+        // absent and the spill succeeded where the whole-file run blocks.
+        // Rebuild the batch with whole-file-equivalent occupancy inside the
+        // spilled extents and let the engine make the same decision the
+        // whole-file run would.
+        let extents: Vec<RangeAddress> = extents.into_iter().map(|(_, e)| e).collect();
+        let mut wb = build_batch_workbook(store, topo, batch, &cells, &ranges, &extents)?;
+        wb.evaluate_all().map_err(|e| e.to_string())?;
+        read_values(&wb, topo, &cells, &mut values)?;
+
+        for (cell_i, extent) in spilled_anchors(&wb, topo, &candidates)? {
+            let anchor = &topo.cells[cell_i as usize];
+            let name = &topo.sheets[anchor.sheet as usize].name;
+            for r in extent.start_row..=extent.end_row {
+                for c in extent.start_col..=extent.end_col {
+                    if r == anchor.row && c == anchor.col {
+                        continue;
+                    }
+                    if let Some(v) = wb.get_value(name, r, c) {
+                        spilled.push((anchor.sheet, r, c, v));
+                    }
                 }
             }
         }
@@ -619,40 +590,237 @@ pub fn run(
         values,
         n_batches: batches.len(),
         biggest_batch_cells,
-        spill_detected,
+        spilled,
     })
 }
 
-/// Whether any placed formula spilled an array into cells the batch never wrote.
+/// Build one batch workbook: the sheets and copied inputs the batch reads,
+/// its workbook-scoped names, its formulas, and — when `seed` is set — the
+/// occupancy the whole file has.
+fn build_batch_workbook(
+    store: &DataStore,
+    topo: &Topology,
+    batch: &[u32],
+    cells: &[u32],
+    ranges: &[RangeRef],
+    seed_extents: &[RangeAddress],
+) -> Result<Workbook, String> {
+    let mut wb = Workbook::new_with_config(crate::clock::pin(WorkbookConfig::ephemeral()));
+    let mut added: HashSet<u16> = HashSet::new();
+    for &i in cells {
+        let s = topo.cells[i as usize].sheet;
+        if added.insert(s) {
+            wb.add_sheet(&topo.sheets[s as usize].name)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    for &(s, ..) in ranges {
+        if added.insert(s) {
+            wb.add_sheet(&topo.sheets[s as usize].name)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    copy_inputs(store, topo, ranges, &mut wb)?;
+    // Workbook-scoped names the formulas use. Their targets were copied
+    // as inputs above, and formula cells inside a target joined the same
+    // component through the dependency union, so they are placed below
+    // rather than read stale. Sheet-scoped names keep the whole-file
+    // fallback (see `partition_verdict`).
+    {
+        let mut defined: HashSet<&str> = HashSet::new();
+        for name in topo.static_names.iter().filter(|n| n.scope == NameScope::Workbook) {
+            if !defined.insert(name.name.as_ref()) {
+                continue;
+            }
+            let (s, ..) = name.target;
+            if added.insert(s) {
+                wb.add_sheet(&topo.sheets[s as usize].name)
+                    .map_err(|e| e.to_string())?;
+            }
+            define_static_name(&mut wb, topo, name)?;
+        }
+    }
+    if !seed_extents.is_empty() {
+        let batch_cells: HashSet<u32> = cells.iter().copied().collect();
+        seed_occupancy(store, topo, &mut wb, seed_extents, &batch_cells)?;
+    }
+    place_formulas_batch(&mut wb, topo, batch)?;
+    Ok(wb)
+}
+
+/// Formulas are parsed here rather than kept in the topology, so no run
+/// holds more parsed trees than one batch needs. A shared formula is
+/// parsed once for the batch and shifted per member. The units follow
+/// component boundaries, which is what bulk ingest needs.
+fn place_formulas_batch(
+    wb: &mut Workbook,
+    topo: &Topology,
+    batch: &[u32],
+) -> Result<(), String> {
+    let mut parsed: HashMap<u32, ASTNode> = HashMap::new();
+    let mut units: Vec<Vec<(u16, u32, u32, ASTNode)>> = Vec::new();
+    let mut unit: Vec<(u16, u32, u32, ASTNode)> = Vec::new();
+    for &c in batch {
+        let comp = &topo.comp_cells[c as usize];
+        let text_bytes: usize = comp
+            .iter()
+            .map(|&i| topo.texts[topo.cells[i as usize].ast as usize].len())
+            .sum();
+        if text_bytes > COMPONENT_TEXT_BUDGET {
+            // Placed straight into the graph, so only one tree of this
+            // component is alive at a time.
+            for &i in comp {
+                let fc = &topo.cells[i as usize];
+                if !parsed.contains_key(&fc.ast) {
+                    let ast = parse(&topo.texts[fc.ast as usize]).map_err(|e| e.to_string())?;
+                    parsed.insert(fc.ast, ast);
+                }
+                let ast = shift_ast(&parsed[&fc.ast], fc.dr, fc.dc);
+                wb.engine_mut()
+                    .set_cell_formula(
+                        &topo.sheets[fc.sheet as usize].name,
+                        fc.row,
+                        fc.col,
+                        ast,
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+            continue;
+        }
+        for &i in comp {
+            let fc = &topo.cells[i as usize];
+            if !parsed.contains_key(&fc.ast) {
+                let ast = parse(&topo.texts[fc.ast as usize]).map_err(|e| e.to_string())?;
+                parsed.insert(fc.ast, ast);
+            }
+            let ast = shift_ast(&parsed[&fc.ast], fc.dr, fc.dc);
+            unit.push((fc.sheet, fc.row, fc.col, ast));
+        }
+        if unit.len() >= INGEST_CHUNK {
+            units.push(std::mem::take(&mut unit));
+        }
+    }
+    if !unit.is_empty() {
+        units.push(unit);
+    }
+    drop(parsed);
+    place_formulas(wb, topo, units)
+}
+
+/// Read the computed value of every placed formula cell.
 ///
-/// A spilled array lays out from its anchor, so any spill covers the cell
-/// immediately right of or below that anchor. Inputs and formulas are exactly
-/// the written set, so a value anywhere else can only be spilled. The engine
-/// lifts bare ranges and scalar arithmetic over ranges to arrays, so no
-/// function-name list can enumerate the shapes: every anchor is checked, at
-/// two engine lookups each, and both miss fast on the hash map.
-fn anchored_spill(
+/// A placed formula with no value is a lost result, not a blank: report it
+/// instead of silently writing `Empty`.
+fn read_values(
     wb: &Workbook,
     topo: &Topology,
     cells: &[u32],
-    written: &HashSet<(u16, u32, u32)>,
-) -> bool {
-    cells.iter().any(|&i| {
+    values: &mut [LiteralValue],
+) -> Result<(), String> {
+    for &i in cells {
         let fc = &topo.cells[i as usize];
-        neighbor_spilled(
-            wb,
-            &topo.sheets[fc.sheet as usize].name,
-            fc.sheet,
-            fc.row,
-            fc.col,
-            written,
-        )
-    })
+        match wb.get_value(&topo.sheets[fc.sheet as usize].name, fc.row, fc.col) {
+            Some(v) => values[i as usize] = v,
+            None => {
+                return Err(format!(
+                    "no value for formula cell {} r{}c{}",
+                    topo.sheets[fc.sheet as usize].name, fc.row, fc.col
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The anchors among the candidate cells that spilled at the last
+/// evaluation, with the exact extent the engine committed.
+///
+/// The engine's inspection API reports the committed rectangle, which the
+/// public `get_value` cannot: it normalises `Empty` to `None`, so a spilled
+/// blank would read back as missing and a footprint scan would truncate.
+fn spilled_anchors(
+    wb: &Workbook,
+    topo: &Topology,
+    candidates: &[u32],
+) -> Result<Vec<(u32, RangeAddress)>, String> {
+    let options = SnapshotOptions { include_values: false };
+    let mut out = Vec::new();
+    for &i in candidates {
+        let fc = &topo.cells[i as usize];
+        let address = CellAddress {
+            sheet: topo.sheets[fc.sheet as usize].name.clone(),
+            row: fc.row,
+            column: fc.col,
+        };
+        let report = wb
+            .engine()
+            .inspect_cell(&address, &options)
+            .map_err(|e| format!("spill inspection failed: {e}"))?;
+        if let Some(SpillRole::Anchor { extent }) = report.cell.spill {
+            out.push((i, extent));
+        }
+    }
+    Ok(out)
+}
+
+/// Give a rebuilt batch workbook the occupancy the whole file has inside
+/// the spilled extents, so the engine's spill decisions match the
+/// whole-file run's.
+///
+/// A spill is blocked by any formula cell and by any non-Empty value; a
+/// present-but-Empty cell does not block, and a cell outside every extent
+/// cannot affect the decision. The store already holds every data value,
+/// and a formula cell outside this batch is unreadable by it — a
+/// referenced formula cell is always in the same component — so a
+/// non-Empty sentinel at those addresses reproduces the block without ever
+/// contaminating a computed value. Seeding is bounded by the spilled
+/// area, not the sheet.
+fn seed_occupancy(
+    store: &DataStore,
+    topo: &Topology,
+    wb: &mut Workbook,
+    extents: &[RangeAddress],
+    batch_cells: &HashSet<u32>,
+) -> Result<(), String> {
+    for extent in extents {
+        let name = &extent.sheet;
+        let Some(s) = topo
+            .sheets
+            .iter()
+            .position(|i| i.name == *name)
+            .map(|i| i as u16)
+        else {
+            continue;
+        };
+        for r in extent.start_row..=extent.end_row {
+            for c in extent.start_col..=extent.end_col {
+                if let Some(&i) = topo.index.get(&(s, r, c)) {
+                    if !batch_cells.contains(&i) {
+                        wb.set_value(name, r, c, LiteralValue::Number(0.0))
+                            .map_err(|e| e.to_string())?;
+                    }
+                    // A batch formula is placed as a formula below.
+                    continue;
+                }
+                if let Some(v) = store.get(s, r, c) {
+                    if !matches!(v, LiteralValue::Empty) {
+                        wb.set_value(name, r, c, v).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Whether the cells right of and below one anchor hold a value the batch
 /// never wrote. Spills lay out right and down, so any anchored spill covers
 /// at least one of these two neighbours.
+///
+/// Only the chunk layout uses this probe: the components layout asks the
+/// engine's inspection API instead. The chunk layout refuses every
+/// array-capable template, so a hit here means the screen has a hole; the
+/// caller fails loudly rather than return wrong rows.
 fn neighbor_spilled(
     wb: &Workbook,
     name: &str,
@@ -935,6 +1103,18 @@ impl ScratchPlan {
 
     pub fn n_data_cols(&self) -> usize {
         self.data_cols.len()
+    }
+
+    /// Whether any template this plan places can produce a spilled array.
+    ///
+    /// A chunk workbook holds only the columns the plan copies, so a spill
+    /// could occupy cells the chunk never wrote. The planner refuses these
+    /// templates and routes the file to the components layout, which
+    /// resolves spills against whole-file occupancy.
+    pub fn array_capable(&self, topo: &Topology) -> bool {
+        self.columns
+            .iter()
+            .any(|c| topo.array_capable.get(c.ast as usize).copied().unwrap_or(false))
     }
 }
 
@@ -1275,7 +1455,6 @@ pub fn run_scratch(
     }
 
     let mut values = vec![LiteralValue::Empty; topo.cells.len()];
-    let mut spill_detected = false;
     let mut start = plan.first_row;
     while start <= plan.last_row {
         let end = start
@@ -1342,8 +1521,13 @@ pub fn run_scratch(
             }
         }
         if chunk_spill {
-            spill_detected = true;
-            break;
+            // The planner refuses every array-capable template on this
+            // layout, so reaching this line means the screen has a hole.
+            // Fail loudly rather than return rows the whole-file run
+            // would disagree with.
+            return Err(
+                "a formula spilled into cells the chunk does not hold".to_string(),
+            );
         }
 
         for t in 1..=(end - start + 1) {
@@ -1368,7 +1552,7 @@ pub fn run_scratch(
         biggest_batch_cells: plan.chunk_rows as u64
             * (plan.columns.len() + plan.data_cols.len()) as u64
             + plan.carry as u64 * plan.carry_cols.len() as u64,
-        spill_detected,
+        spilled: Vec::new(),
     })
 }
 
@@ -1746,6 +1930,7 @@ mod tests {
             comp_refs: vec![Vec::new(); extents.len()],
             blanks: Vec::new(),
             text_criteria_ifs: 0,
+            array_capable: Vec::new(),
             comp_extent: extents.to_vec(),
             index: HashMap::new(),
             full_extent_cells: 0,
@@ -2326,40 +2511,130 @@ mod tests {
         assert_eq!(whole_value(&data, "S", 5, 2), Some(LiteralValue::Text("shared\r".into())));
     }
 
-    /// A spilled array writes cells no formula read, so the whole-file run
-    /// may block where a batch stays free. `INDEX` with a zero row returns
-    /// the whole column: it spills down from the anchor, `B3` blocks that
-    /// spill in the whole-file run but is outside the batch closure, and the
-    /// batch reports the spill instead of returning the first element.
-    /// Without the blocker both paths agree on that element.
+    /// A spilled array writes cells no formula read, so a batch that copies
+    /// only the dependency closure can miss a blocker. When the batch
+    /// anchors a spill, the run rebuilds it with whole-file occupancy: the
+    /// engine then blocks exactly where the whole-file run blocks, and the
+    /// spilled values of a free spill are served from the overlay.
     #[test]
-    fn an_anchored_spill_falls_back_to_the_whole_file_run() {
+    fn a_batch_spill_reproduces_the_whole_file_decision() {
+        // Blocked: B3 holds a value the whole-file run sees, so the anchor
+        // reports the spill error and nothing is overlaid.
         let blocked = spill_fixture(true);
         let mut topo = topo_of(&blocked);
         let store = DataStore::load(&mut topo);
         let result = run(&store, &topo, DEFAULT_BUDGET_CELLS).unwrap();
-        assert!(result.spill_detected, "the spill must be reported");
+        assert_eq!(result.values[0], spill_error());
+        assert!(result.spilled.is_empty(), "{:?}", result.spilled);
         assert_eq!(whole_value(&blocked, "S", 2, 2), Some(spill_error()));
 
-        // Without the blocker both paths spill successfully and agree on
-        // the anchor value. The batch still reports the spill: whether the
-        // whole-file run blocks is unknowable without its occupancy, so any
-        // anchored spill falls back.
+        // Free: both runs spill identically, so the anchor holds the first
+        // element and the overlay serves the footprint the store lacks.
         let free = spill_fixture(false);
         let mut topo = topo_of(&free);
         let store = DataStore::load(&mut topo);
         let result = run(&store, &topo, DEFAULT_BUDGET_CELLS).unwrap();
-        assert!(result.spill_detected, "the spill anchored");
-        // Values are only valid without a spill; the fallback target holds
-        // the agreed first element.
+        assert_eq!(result.values[0], LiteralValue::Number(10.0));
+        assert_eq!(
+            result.spilled,
+            vec![
+                (0u16, 3u32, 2u32, LiteralValue::Number(20.0)),
+                (0u16, 4u32, 2u32, LiteralValue::Number(30.0)),
+            ]
+        );
         assert_eq!(whole_value(&free, "S", 2, 2), Some(LiteralValue::Number(10.0)));
     }
 
-    /// The engine lifts scalar arithmetic over a range to an array, so no
-    /// function-name list can enumerate the spilling shapes. The detector
-    /// watches every anchor instead.
+    /// Engine-behavior guard for the reducer screen. If a future engine
+    /// adds elementwise lifting, `ABS(A1:A3)` would spill and
+    /// `REDUCING_FNS` would hide it; these assertions must fail loudly
+    /// then.
     #[test]
-    fn lifted_scalar_arithmetic_spills_like_an_array_call() {
+    fn reducers_consume_arrays_without_lifting() {
+        let sheet = format!(
+            "{}{}{}{}{}",
+            r#"<c r="A1" t="inlineStr"><is><t>abc</t></is></c>"#,
+            cell_v("A2", "20"),
+            cell_v("A3", "30"),
+            cell_f("B1", "ABS(A1:A3)"),
+            cell_f("B2", "LEN(A1:A3)"),
+        );
+        let data = xlsx(&[("S", &sheet)]);
+        // ABS over a range is a value error, not a lifted array.
+        assert_eq!(
+            whole_value(&data, "S", 1, 2),
+            Some(LiteralValue::Error(formualizer::common::error::ExcelError::new(
+                formualizer::common::error::ExcelErrorKind::Value
+            )))
+        );
+        // LEN takes the implicit intersection.
+        assert_eq!(whole_value(&data, "S", 2, 2), Some(LiteralValue::Number(3.0)));
+    }
+
+    /// Two footprints that overlap with neither anchor inside the other
+    /// resolve by placement order, which inside one batch is the source
+    /// order the whole run uses; across batches the run refuses instead of
+    /// guessing.
+    #[test]
+    fn overlapping_spill_footprints_follow_source_order_or_refuse() {
+        let sheet = format!(
+            "{}{}",
+            cell_f("E1", "SEQUENCE(5,2)"),
+            cell_f("B3", "SEQUENCE(2,5)"),
+        );
+        let data = xlsx(&[("S", &sheet)]);
+
+        // One batch: the engine resolves the overlap itself, and the
+        // row-major placement order matches the whole run's source order.
+        let mut topo = topo_of(&data);
+        let store = DataStore::load(&mut topo);
+        let result = run(&store, &topo, DEFAULT_BUDGET_CELLS).unwrap();
+        assert_eq!(result.values[0], LiteralValue::Number(1.0));
+        assert_eq!(result.values[1], spill_error());
+        assert_eq!(whole_value(&data, "S", 1, 5), Some(LiteralValue::Number(1.0)));
+        assert_eq!(whole_value(&data, "S", 3, 2), Some(spill_error()));
+
+        // Separate batches: neither batch sees the other's footprint, so
+        // the run refuses rather than return two winners.
+        let mut topo = topo_of(&data);
+        let store = DataStore::load(&mut topo);
+        let err = run(&store, &topo, 1).unwrap_err();
+        assert!(err.contains("overlap"), "{err}");
+    }
+
+    /// A footprint that covers another formula's cell makes the whole run
+    /// fail its evaluation outright; the run refuses instead of returning
+    /// values the whole run would not have.
+    #[test]
+    fn a_footprint_over_a_foreign_formula_refuses_to_answer() {
+        // B2 spills B2:B4; B4 is a formula in its own component. A budget
+        // of 4 splits the components, so pass 2 would seed B4 with a
+        // sentinel value and return a clean #SPILL!; the guard refuses.
+        let sheet = format!(
+            "{}{}",
+            cell_f("B2", "INDEX($A$1:$A$3,0)"),
+            cell_f("B4", "1+1"),
+        );
+        let data = xlsx(&[("S", &sheet)]);
+        let mut topo = topo_of(&data);
+        let store = DataStore::load(&mut topo);
+        let err = run(&store, &topo, 4).unwrap_err();
+        assert!(err.contains("formula cell"), "{err}");
+
+        // In one batch the engine itself refuses the footprint over a
+        // formula, exactly as the whole run does.
+        let mut topo = topo_of(&data);
+        let store = DataStore::load(&mut topo);
+        let err = run(&store, &topo, DEFAULT_BUDGET_CELLS).unwrap_err();
+        assert!(err.contains("BlockedByFormula"), "{err}");
+    }
+
+    /// The engine lifts scalar arithmetic over a range to an array, so no
+    /// function-name list can enumerate the spilling shapes. The screen
+    /// flags the range instead, and the batch resolves the spill against
+    /// whole-file occupancy.
+    #[test]
+    fn lifted_scalar_arithmetic_resolves_like_an_array_call() {
         let mut sheet = String::new();
         for (r, v) in [(1u32, "10"), (2, "20"), (3, "30")] {
             sheet.push_str(&cell_v(&format!("A{r}"), v));
@@ -2370,7 +2645,8 @@ mod tests {
         let mut topo = topo_of(&data);
         let store = DataStore::load(&mut topo);
         let result = run(&store, &topo, DEFAULT_BUDGET_CELLS).unwrap();
-        assert!(result.spill_detected, "the lifted spill must be reported");
+        assert_eq!(result.values[0], spill_error());
+        assert_eq!(whole_value(&data, "S", 2, 2), Some(spill_error()));
     }
 
     /// `INDEX(A1:A3,0)` spills `B2:B4`. With `blocked` a value sits at `B3`.

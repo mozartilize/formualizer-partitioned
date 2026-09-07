@@ -61,6 +61,8 @@ mod testkit;
 mod values;
 
 
+use std::collections::HashMap;
+
 use chrono::{Datelike, Timelike};
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{PyIOError, PyRuntimeError};
@@ -303,6 +305,18 @@ fn decide(
         // may have been fine while another gate (say `min_formulas`) refused.
         (Some(v), plan) => Decision { verdict: Some(v), layout: None, chunk_reason: plan.err() },
         (None, Ok(plan)) => {
+            // A chunk workbook holds only the columns the plan copies, so a
+            // spilled array could occupy cells the chunk never wrote. The
+            // components layout resolves spills against whole-file
+            // occupancy (see `partition::run`), so array-capable templates
+            // must not take the chunk path.
+            if plan.array_capable(topo) {
+                return Decision {
+                    verdict: None,
+                    layout: Some(Layout::Components),
+                    chunk_reason: Some("array-capable formulas"),
+                };
+            }
             Decision { verdict: None, layout: Some(Layout::Chunks(plan)), chunk_reason: None }
         }
         (None, Err(reason)) => {
@@ -556,6 +570,23 @@ fn sheet_extents(topo: &graph::Topology, trim: bool) -> Vec<(String, Option<u16>
         .collect()
 }
 
+/// Grow the reported extents to cover spilled cells.
+///
+/// The engine's own dimensions grow with a spill, so the whole-file side
+/// reports rows and columns a spill added; the partitioned side must
+/// report them too or the row sets disagree.
+fn grow_extents(
+    sheets: &mut [(String, Option<u16>, u32, u32)],
+    spilled: &[(u16, u32, u32, LiteralValue)],
+) {
+    for &(s, r, c, _) in spilled {
+        if let Some(entry) = sheets.iter_mut().find(|(_, si, _, _)| *si == Some(s)) {
+            entry.2 = entry.2.max(r);
+            entry.3 = entry.3.max(c);
+        }
+    }
+}
+
 /// Where a streamed row gets its values from.
 enum RowSource {
     /// Component-by-component results plus the data cells behind them.
@@ -563,6 +594,9 @@ enum RowSource {
         topo: graph::Topology,
         store: partition::DataStore,
         values: Vec<LiteralValue>,
+        /// Cells a spilled array wrote that no formula reads; served in
+        /// place of the store, which does not hold them.
+        spilled: HashMap<(u16, u32, u32), LiteralValue>,
     },
     /// One chunk of the formula sheet at a time. The rows of that sheet are
     /// read from the file as the caller asks for them, so no run holds the
@@ -635,15 +669,17 @@ impl RowIter {
             self.row += 1;
             let py_row = PyList::empty(py);
             match &mut self.source {
-                RowSource::Partitioned { topo, store, values } => {
+                RowSource::Partitioned { topo, store, values, spilled } => {
                     for cc in 1..=max_col {
-                        // A formula cell takes its computed value; anything else
-                        // comes from the store, and a miss means it is blank.
+                        // A formula cell takes its computed value; anything
+                        // else comes from the store, and a miss means it is
+                        // blank. Cells a spill wrote override the store.
                         match si.and_then(|s| topo.index.get(&(s, rr, cc))) {
                             Some(&i) => py_row.append(literal_to_py(py, &values[i as usize])?)?,
                             None => {
                                 let v = si
-                                    .and_then(|s| store.get(s, rr, cc))
+                                    .and_then(|s| spilled.get(&(s, rr, cc)).cloned())
+                                    .or_else(|| si.and_then(|s| store.get(s, rr, cc)))
                                     .unwrap_or(LiteralValue::Empty);
                                 py_row.append(literal_to_py(py, &v)?)?;
                             }
@@ -770,7 +806,7 @@ fn eval_rows_impl(
         return Ok((rows, info));
     };
 
-    let sheets = sheet_extents(&topo, trim);
+    let mut sheets = sheet_extents(&topo, trim);
 
     match layout {
         Layout::Chunks(plan) => {
@@ -807,15 +843,14 @@ fn eval_rows_impl(
                         .map_err(|e| PyRuntimeError::new_err(format!("reading values failed: {e}")))?;
                     let evaluated = run_partitioned(&store, &topo, budget, &Layout::Chunks(plan))
                         .map_err(|e| PyRuntimeError::new_err(format!("partitioned eval failed: {e}")))?;
-                    // A spill the whole-file run would block on cannot be
-                    // represented here, so the run falls back to it.
-                    if evaluated.spill_detected {
-                        let rows = whole_row_iter(data, &topo, trim, "spill detected in a partitioned batch")?;
-                        let info = RunInfo { impl_mode: "whole", stream_refusal: Some(e), chunk, n_batches };
-                        return Ok((rows, info));
-                    }
+                    grow_extents(&mut sheets, &evaluated.spilled);
                     let rows = RowIter {
-                        source: RowSource::Partitioned { topo, store, values: evaluated.values },
+                        source: RowSource::Partitioned {
+                            topo,
+                            store,
+                            values: evaluated.values,
+                            spilled: evaluated.spilled.into_iter().map(|(s, r, c, v)| ((s, r, c), v)).collect(),
+                        },
                         sheets,
                         sheet: 0,
                         row: 1,
@@ -831,15 +866,14 @@ fn eval_rows_impl(
             let store = partition::DataStore::load(&mut topo);
             let evaluated = run_partitioned(&store, &topo, budget, &Layout::Components)
                 .map_err(|e| PyRuntimeError::new_err(format!("partitioned eval failed: {e}")))?;
-            // A spill the whole-file run would block on cannot be
-            // represented here, so the run falls back to it.
-            if evaluated.spill_detected {
-                let rows = whole_row_iter(data, &topo, trim, "spill detected in a partitioned batch")?;
-                let info = RunInfo { impl_mode: "whole", stream_refusal: None, chunk: None, n_batches };
-                return Ok((rows, info));
-            }
+            grow_extents(&mut sheets, &evaluated.spilled);
             let rows = RowIter {
-                source: RowSource::Partitioned { topo, store, values: evaluated.values },
+                source: RowSource::Partitioned {
+                    topo,
+                    store,
+                    values: evaluated.values,
+                    spilled: evaluated.spilled.into_iter().map(|(s, r, c, v)| ((s, r, c), v)).collect(),
+                },
                 sheets,
                 sheet: 0,
                 row: 1,
@@ -875,14 +909,13 @@ fn eval_partitioned(
     let budget = budget_cells.unwrap_or(partition::DEFAULT_BUDGET_CELLS);
     let evaluated = run_partitioned(&store, &topo, budget, &layout)
         .map_err(|e| PyRuntimeError::new_err(format!("partitioned eval failed: {e}")))?;
-    // A spill the whole-file run would block on cannot be represented here,
-    // so the run falls back to it.
-    if evaluated.spill_detected {
-        return eval_whole(py, data);
-    }
+    let mut extents = sheet_extents(&topo, false);
+    grow_extents(&mut extents, &evaluated.spilled);
+    let spilled: HashMap<(u16, u32, u32), LiteralValue> =
+        evaluated.spilled.into_iter().map(|(s, r, c, v)| ((s, r, c), v)).collect();
 
     let out = PyDict::new(py);
-    for (name, si, max_row, max_col) in sheet_extents(&topo, false) {
+    for (name, si, max_row, max_col) in extents {
         let sheet_list = PyList::empty(py);
         if max_row >= 1 && max_col >= 1 {
             for rr in 1..=max_row {
@@ -896,7 +929,8 @@ fn eval_partitioned(
                         }
                         None => {
                             let v = si
-                                .and_then(|s| store.get(s, rr, cc))
+                                .and_then(|s| spilled.get(&(s, rr, cc)).cloned())
+                                .or_else(|| si.and_then(|s| store.get(s, rr, cc)))
                                 .unwrap_or(LiteralValue::Empty);
                             py_row.append(literal_to_py(py, &v)?)?;
                         }
@@ -1013,13 +1047,13 @@ fn _benchmark_rows(
                 let store = partition::DataStore::load(&mut topo);
                 let evaluated = run_partitioned(&store, &topo, budget_cells, &Layout::Chunks(plan))
                     .map_err(|e| PyRuntimeError::new_err(format!("partitioned eval failed: {e}")))?;
-                if evaluated.spill_detected {
-                    return Err(PyRuntimeError::new_err(
-                        "mode=\"scratch\" anchored a spill the whole-file run would block on",
-                    ));
-                }
                 let rows = RowIter {
-                    source: RowSource::Partitioned { topo, store, values: evaluated.values },
+                    source: RowSource::Partitioned {
+                        topo,
+                        store,
+                        values: evaluated.values,
+                        spilled: evaluated.spilled.into_iter().map(|(s, r, c, v)| ((s, r, c), v)).collect(),
+                    },
                     sheets,
                     sheet: 0,
                     row: 1,
@@ -1046,13 +1080,13 @@ fn _benchmark_rows(
             let store = partition::DataStore::load(&mut topo);
             let evaluated = run_partitioned(&store, &topo, budget_cells, &Layout::Components)
                 .map_err(|e| PyRuntimeError::new_err(format!("partitioned eval failed: {e}")))?;
-            if evaluated.spill_detected {
-                return Err(PyRuntimeError::new_err(
-                    "mode=\"components\" anchored a spill the whole-file run would block on",
-                ));
-            }
             let rows = RowIter {
-                source: RowSource::Partitioned { topo, store, values: evaluated.values },
+                source: RowSource::Partitioned {
+                    topo,
+                    store,
+                    values: evaluated.values,
+                    spilled: evaluated.spilled.into_iter().map(|(s, r, c, v)| ((s, r, c), v)).collect(),
+                },
                 sheets,
                 sheet: 0,
                 row: 1,
@@ -1173,6 +1207,23 @@ mod tests {
         assert!(d.verdict.is_none());
         assert!(matches!(d.layout, Some(Layout::Chunks(_))));
         assert!(d.chunk_reason.is_none());
+    }
+
+    #[test]
+    fn an_array_capable_file_takes_the_component_layout() {
+        // Row-local, so the chunk contract itself holds; the spill-capable
+        // template routes it to components, which resolve spills against
+        // whole-file occupancy.
+        let mut sheet = String::new();
+        for r in 1..=20u32 {
+            sheet.push_str(&cell_v(&format!("A{r}"), &r.to_string()));
+            sheet.push_str(&cell_f(&format!("B{r}"), &format!("INDEX(A{r}:A{r},0)")));
+        }
+        let topo = topology(&xlsx(&[("S", &sheet)]));
+        let d = decide(&topo, DEFAULT_MAX_RATIO, 0, partition::DEFAULT_CHUNK_ROWS, partition::DEFAULT_LOOKUP_BUDGET);
+        assert!(d.verdict.is_none(), "{:?}", d.verdict);
+        assert!(matches!(d.layout, Some(Layout::Components)));
+        assert_eq!(d.chunk_reason, Some("array-capable formulas"));
     }
 
     #[test]
