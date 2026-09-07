@@ -12,6 +12,10 @@ publish = false
 exclude = ["partition_probe"]
 
 [[bin]]
+name = "budgetprobe"
+path = "budgetprobe.rs"
+
+[[bin]]
 name = "circprobe"
 path = "circprobe.rs"
 
@@ -31,11 +35,15 @@ path = "phaseprobe.rs"
 name = "splitprobe"
 path = "splitprobe.rs"
 
+[[bin]]
+name = "textcrit"
+path = "textcrit.rs"
+
 [dependencies.formualizer]
 # Keep this revision in step with the library manifest. A probe that measures a
 # different engine than the library builds against reports nothing useful.
 git = "https://github.com/mozartilize/formualizer"
-rev = "c1079ef9"
+rev = "2be5f57e"
 default-features = false
 features = ["common", "parse", "eval", "workbook", "calamine", "system-clock"]
 
@@ -49,3 +57,4 @@ default-features = false
 [profile.release]
 lto = "thin"
 codegen-units = 1
+

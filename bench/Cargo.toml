@@ -1,0 +1,35 @@
+[package]
+name = "corpus-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "corpus_bench"
+path = "corpus_bench.rs"
+test = false
+bench = false
+
+[dependencies]
+chrono = "0.4"
+quick-xml = "0.37"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+serde = "1"
+serde_json = "1"
+libc = "0.2"
+
+[dependencies.formualizer]
+# Pinned to the fork branch carrying the bulk-ingest edge-loss fix, by exact
+# revision so a force-push cannot change what a benchmark measured. Move back
+# to an upstream tag once the fix is released.
+# https://github.com/mozartilize/formualizer/tree/fix/bulk-ingest-partial-vertex-set
+git = "https://github.com/mozartilize/formualizer"
+rev = "2be5f57e"
+default-features = false
+features = ["common", "parse", "eval", "workbook", "calamine", "system-clock"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+

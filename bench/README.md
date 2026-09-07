@@ -17,45 +17,124 @@ python bench/golden_diff.py                     # generated + downloaded files
 python bench/corpus_diff.py DIR                 # a corpus of real files
 python bench/plan_reasons.py DIR --out before.jsonl   # per-file planner reasons
 python bench/plan_reasons.py --diff before.jsonl after.jsonl
-python bench/corpus_bench.py DIR --check --results results.jsonl  # memory, speed, correctness
-python bench/corpus_bench.py DIR --min-formulas 2000 --results prod.jsonl  # production gate
-python bench/corpus_bench.py DIR --jobs 8 --results results.jsonl  # cap concurrency
+cargo build --release --locked --manifest-path bench/Cargo.toml
+bench/target/release/corpus_bench DIR --check --results results.jsonl
+bench/target/release/corpus_bench DIR --min-formulas 2000 --results prod.jsonl
+bench/target/release/corpus_bench DIR --jobs 8 --results results.jsonl
 python bench/bench_scratch.py ROWS              # forced-mode ablation measurements
 bash bench/data/fetch_corpora.sh                # download SSB and Sheetpedia
 ```
 
 The two sweeps pass `min_formulas=0` so that they exercise the partitioned path
 rather than the size heuristic that governs production use. Pass
-`--min-formulas 2000` to `corpus_bench.py` or `plan_reasons.py` to measure what
+`--min-formulas 2000` to `corpus_bench` or `plan_reasons.py` to measure what
 production actually splits instead.
 
-`corpus_bench.py` reports the memory and speed trade. Peak memory uses a fresh
-process for each mode on the largest 25 files (override with positional `top_n`).
-Each timing pair also uses a fresh process. Both timed paths JSON-encode every
-row; setup and correctness checks are outside those timings. RSS is a high-water
-mark, so the parent never parses workbooks before launching measurements.
+`corpus_bench` is a standalone Linux Rust executable with its own manifest and
+lockfile. It compiles the native engine source modules directly, without the
+Python binding, libpython, or changes to the production crate's public API.
+`corpus_bench.py` is only a compatibility launcher for `cargo run --release`.
+
+Peak memory uses a fresh process for each mode on the largest 25 files (override
+with positional `top_n`). Each timing pair also uses a fresh process. Both timed
+paths JSON-encode every row using a reusable byte buffer. The whole path retains
+the complete native grid; the partitioned path reuses one row buffer. File I/O,
+eligibility planning, and correctness checks are outside those timings;
+evaluator loading, planning, evaluation, serialization and disposal are timed.
+RSS is a high-water mark, so the parent never parses workbooks before launching
+measurements.
+
+These are **native Rust measurements**, not Python API measurements. There are
+no Python objects or per-cell FFI calls. JSON uses native date/time/duration
+formatting and encodes non-finite numbers as null; correctness compares native
+values before serialization. Do not compare the new timings or RSS directly
+with the historical Python measurements below.
 
 Workers default to a 120-second timeout and a 4096 MiB address-space cap. Override
 with `--timeout` and `--memory-mb` (0 disables the memory cap). File workers run
 concurrently (`--jobs`, default CPU count); lower that if large workbooks compete
-for RAM. Every timing is measured inside its own worker process and summed per
-file, so `--jobs` changes how long a sweep takes, not what it reports.
+for RAM. Every timing is measured inside its own worker process. Concurrent
+workers compete for CPU and RAM; use `--jobs 1` for uncontended timings and totals.
 Crashes and timeouts are recorded, not allowed to abort the sweep. The `--results` JSONL file must not
 already exist and is flushed after every result. Each record includes the full
-corpus-relative path, phase, status, measurements or skip/error reason. Memory
-records include raw peak RSS, the interpreter baseline, net peak RSS, and seconds.
-The log prints cumulative timing and outcome counts every 100 files.
+corpus-relative path, phase, status, `engine: "rust"`, `schema_version`,
+`baseline: "formualizer whole-file"`, and measurements or a staged error reason.
+Every failure carries `stage` (`archive`, `formualizer`, `materialized`,
+`streamed_setup`, `streamed_row`, `whole`, `partitioned`,
+`file_read`, `resource_limits`, `peak_rss`, `arguments`) so a failure names the
+phase that produced it. An unreadable Excel cache is not a failure: the caches
+are non-authoritative, so the evidence just reports `available: false`. `speed` records also carry `planner` counters and, per
+path, `rows`, `cells`, `json_bytes`, the executed `implementation`
+(`whole`/`streamed`/`scratch`/`components`) and any `stream_refusal`; identical
+row, cell and byte counts on both paths show the two runs did equal work.
+Memory records include raw peak RSS, the native process baseline, net peak RSS,
+and seconds, and the partitioned record adds `vs_formualizer` time, peak and
+net-peak ratios and deltas. Results are written in completion order, so a slow
+file does not block completed files from being recorded.
+The log prints outcome counts every 100 files.
 
-`--check` compares `eval_partitioned` and `eval_rows` exactly with `eval_grid` in
-another worker. All three calls share one instant for `NOW` and `TODAY`, so a
+## Correctness and performance signals
+
+`--check` compares the native store-backed and streamed partitioned paths with
+the Formualizer whole-file baseline in another worker. It compares values
+exactly, allowing identical numbers represented as engine `Int` versus `Number`,
+treating `Empty`/`Pending` alike, and comparing errors by kind and message. All
+three runs share one instant for `NOW` and `TODAY`, so a
 file that reads the clock cannot disagree merely because two calls straddled a
-second. It records difference counts and the first differing location
-and values. This checks partitioning consistency, not correctness against Excel;
-last-bit floating-point differences count as mismatches. Non-partitionable files
+second. Non-partitionable files
 are skipped with the planner's fallback reason. Correctness checks are also
 skipped, with an explicit reason, when timing fails. Files containing `_answer`
 in their names are excluded and recorded separately. A completed sweep exits 1
 if any measurement fails or any correctness check disagrees; otherwise it exits 0.
+
+Each `correctness` record reports, per compared path:
+
+- `comparisons.*.kinds`: mismatch counts by kind (`value`, `row_width`,
+  `row_count`, `row_sequence`, `sheet_set`, `unexpected_row`).
+- `comparisons.*.samples`: up to 10 located mismatches with sheet, row, column,
+  both values, and `numeric_delta` (absolute and relative). `samples_truncated`
+  says more exist. A last-bit float difference is therefore separable from a
+  wrong result by its relative delta, without re-running the file.
+- `error_values`: `#DIV/0!`-style error counts per path. Equal counts with zero
+  differences mean partitioning did not introduce or hide an error value.
+- `timings`: seconds for the whole-file, store-backed and streamed runs.
+
+`excel_cached` reports the formula caches Excel last wrote, as evidence only:
+`"authoritative": false`. A cache can be stale, absent, or written by another
+engine, so it never changes the exit code. Per path it reports `matched`,
+`mismatch`, `missing` (no cached value), `unsupported` (a cached payload this
+reader does not decode), and `missing_actual` counts, plus `unvisited` formula
+cells and up to 10 samples with the formula text, its `si` shared index, the raw
+cached payload and the numeric delta. When the two evaluated paths agree but
+both disagree with a fresh cache, the disagreement is with Formualizer or Excel,
+not with partitioning. Value mismatch samples also carry
+`cache_matches_formualizer` and `cache_matches_actual`, which say which side the
+cache supports. Numeric caches are compared on Excel's serial scale, honoring
+the workbook's `date1904` flag, so a native date is not reported as differing
+from the serial that encodes it. `calculation` carries the workbook's
+`calcPr` attributes; `fullCalcOnLoad` or a foreign `calcId` is a reason to
+distrust the cache.
+
+A whole-side abort (SIGABRT under the address-space cap, e.g. a bogus
+full-width `dimension` that makes the eager whole load reserve gigabytes) kills
+its worker before it prints. The sweep then salvages the partitioned side
+instead of reporting nothing: the `speed` record keeps its error status but
+gains the salvaged timing plus `partitioned_status: ok`, and `correctness`
+falls back to a partitioned-only check (`comparisons.materialized_vs_streamed`,
+`whole_baseline: "unavailable"`) with `whole_status`/`whole_stage`/`whole_reason`
+naming what died. The lost whole baseline still counts as a failed measurement
+in the exit code. Memory already isolates the two sides into separate workers.
+
+Triage a finished sweep from the JSONL:
+
+```sh
+jq -c 'select(.phase=="correctness" and .status=="mismatch") | {path, differences, first}' results.jsonl
+jq -c 'select(.stage) | {path, phase, stage, reason}' results.jsonl          # every failure, by phase
+jq -s 'map(select(.phase=="speed" and .status=="ok")) | sort_by(-.time_ratio)[:10]
+       | map({path, time_ratio, whole, partitioned})' results.jsonl          # slowest vs Formualizer
+jq -c 'select(.phase=="memory_partitioned" and .status=="ok" and .vs_formualizer.net_peak_ratio > 1)
+       | {path, v: .vs_formualizer}' results.jsonl                           # files partitioning does not help
+```
 
 `cargo test` needs `--no-default-features` because the default
 `extension-module` feature unlinks libpython, which the test harness needs.
@@ -187,14 +266,55 @@ files in these two corpora, and the baseline sweep holds 10 more. The reader
 now reports those sheets too (`Sources::name_only_sheets`), which fixed all 9.
 An external reference (`[1]Sheet1`) invents nothing and is not counted.
 
-**A declared cell with no value is absent from a mini-workbook.** `<c r="G36"
-s="26" t="n"/>` holds no value but does exist, and the whole-file loader keeps
-it. The value store drops it, so `COUNTIF(G$2:G$37,"")` counts 2 in a
-whole-file run and 0 in a batch. One file in these corpora disagrees for this
-reason. Storing every valueless declared cell would undo the trim work that
-keeps style-only rows out of memory, and refusing every file that pairs a
-blank-sensitive call with such a cell would cost 23 files to fix 2, so neither
-is implemented. See the plan for the bounded version of the fix.
+**A declared cell with no value is absent from a mini-workbook, unless a
+formula range covers it.** `<c r="G36" s="26" t="n"/>` holds no value but
+does exist, and the whole-file loader keeps it as a blank. The reader now
+records such cells (`Sources::blanks`), and the store keeps the ones a
+component range covers, as blank entries. The extra entries are bounded by
+referenced area, not by sheet extent, so the trim work that keeps style-only
+tail areas out of memory is intact. `COUNTBLANK(G$2:G$37)` now answers 2 on
+both paths (`0490-191816d1352222582`), verified by a loader-oracle unit test.
+
+**A text criterion in an aggregate follows Excel coercion on both
+paths.** The engine matches `COUNTIF(range,"1")`, `SUMIF(range,"")` and
+friends through a lowered-text lane, and the two lane builders used to
+disagree: the base lane (loader-built workbooks) held text only, while the
+overlay lane (incrementally-built workbooks) rendered numbers and booleans
+to their string forms. `COUNTIF(range,"1")` therefore answered 0 on the
+whole-file path and 1 (the Excel answer) in a batch. The pinned engine rev
+now renders numeric and boolean cells in the base lane the same way
+(`formualizer` commit `2be5f57e`), so both paths agree and these calls
+partition. Wildcards keep matching text only, and the counter remains
+as a diagnostic.
+
+**A spilled array is resolved against whole-file occupancy.** A spilled
+array (`INDEX(range,n,0)`, bare ranges, scalar arithmetic lifted over a
+range) writes cells no formula reads, and a mini-workbook copies only the
+dependency closure, so a blocker that occupies one of those cells would
+stay absent and a spill succeed where the whole-file run reports
+`#SPILL!`. Templates that can spill (a range or named range flowing to
+the result, an array literal, or an array-producing call such as
+`SEQUENCE`; reducers such as `SUM` consume their arrays and are not
+flagged) never take the chunk layout, and the components layout inspects
+the anchors of flagged templates after each batch. When one anchored a
+spill, the batch is rebuilt with whole-file-equivalent occupancy — every
+non-Empty store value of the touched sheets plus a sentinel at every
+formula address outside the batch — and re-evaluated, so the engine makes
+the same decision the whole-file run would. Blocked anchors come back as
+`#SPILL!`; the spilled values of a free spill are served from an overlay
+consulted in place of the store. The inspection uses the engine's
+spill-role API, which reports the committed extent exactly (public reads
+normalise `Empty` to missing, so a footprint scan would truncate on
+spilled blanks).
+
+Two footprint shapes cannot be reproduced and are refused instead of
+answered: a footprint that covers another formula's cell (the whole run
+fails its evaluation with `BlockedByFormula`, where a seeded batch would
+return a clean `#SPILL!`), and footprints that overlap across batches
+(the whole run blocks one in source order, which a partitioned run
+cannot replay). Within one batch the engine resolves overlaps itself,
+and its row-major placement order is the source order, so the winner
+matches.
 
 **Literal `INDIRECT` does not occur.** `INDIRECT("Sheet1!A1")` is statically
 resolvable, and rewriting it to `$A$1` would remove the dynamic-reference and
@@ -283,15 +403,15 @@ one row at a time. This fixture measures the evaluation side.
 
 ## Ordinary workbooks
 
-The numbers below are the peak RSS of a Python process that JSON-encodes every
-row, net of the interpreter's own footprint. Each measurement uses its own
-process. Reproduce them by selecting the files a build actually splits, then
-measuring only those:
+The historical numbers below are the peak RSS of the previous Python runner,
+net of the interpreter's footprint. The new native runner does not reproduce
+that Python overhead. To measure the equivalent population natively, select the
+files a build actually splits, then measure only those:
 
 ```sh
 python bench/plan_reasons.py bench/data/sheetpedia --out prod.jsonl --min-formulas 2000
 # symlink the files whose "partitioned" is true into one directory, then
-python bench/corpus_bench.py THAT_DIR 23 --min-formulas 2000 --results ord.jsonl
+bench/target/release/corpus_bench THAT_DIR 23 --min-formulas 2000 --results ord.jsonl
 ```
 
 The population moves whenever a gate changes, so re-select it before comparing
@@ -335,6 +455,53 @@ a file the fixed cost of building a topology cannot be repaid. `min_formulas`
 exists for exactly that reason; the 76 files of at least 10000 cells run at
 1.36x. On the 25 largest, memory is 701.9 MB whole against 345.6 MB
 partitioned, a median gain of 1.34x and a best of 3.59x.
+
+## A 12 KB file that kills the whole-file path
+
+`bench/data/ssb/all_data_912_v0.1/spreadsheet/54105/1_54105_input.xlsx` is
+12,657 bytes, 50 cells, 7 small formulas (`LEN`, `COUNTIF`, `RIGHT`/`SEARCH`).
+It aborts the whole-file run with `memory allocation of 262144 bytes failed`
+under the 4 GB worker cap — and still aborts under an 8 GB cap. Its siblings
+(`2_`, `3_`), re-saved by Excel, pass with extent 120.
+
+The file was written by WPS, and its declared dimension is `A1:XFD20`: full
+width, 16384 columns by 20 rows, 327,680 extent cells for content that fits in
+`A1:F20`. A stage-by-stage probe peaks at 5.4 MB through read, fold, graph
+build and value store (31 values); the abort happens inside the engine's eager
+whole-file load, which follows the declared extent. Trimming only the
+dimension to `A1:F20` on a copy brings the whole pipeline to 13 MB peak, while
+removing the full-width merge (`A1:XFD4`) or narrowing the `<cols>` entry
+still aborts: the dimension is the sole trigger.
+
+Whole-file cost follows declared extent, not disk bytes. The partitioned path
+never materializes the grid, so it is unaffected — and since the whole-side
+worker dies before printing, the sweep salvages it (see the fallback above):
+the `speed` record keeps its error status with the partitioned timing intact,
+and `correctness` falls back to `materialized_vs_streamed` (ok here, with the
+Excel caches matching 7/7 on both paths). The lost baseline still fails the
+sweep. A file this small that kills the whole path is the shape a regression
+fixture wants: 50 cells, one bogus dimension.
+
+## A 125 KB file with a 4.7M-cell extent
+
+`bench/data/ssb/all_data_912_v0.1/spreadsheet/34493/2_34493_input.xlsx` is
+125,192 bytes on disk (sheet XML inflates to 864,822 bytes), with a measured
+extent of 4,673,936 cells and only 54 formulas. It aborts the speed worker
+under the 4 GB cap, same symptom as the 12 KB file above — but the rerun
+under an 8 GB cap passes: whole 0.69 s against partitioned 0.12 s
+(time_ratio 0.18x, `components` strategy).
+
+The two files are opposite cases with the same lesson. The 12 KB file's
+extent is bogus (a WPS-declared `A1:XFD20` over `A1:F20` content) and its
+footprint is unbounded: it aborts at 8 GB too. The 125 KB file's extent is
+real — a wide, sparse sheet — and its footprint is finite, between 4 and
+8 GB, so a bigger cap recovers it. Disk bytes predict neither: 125 KB needs
+gigabytes while other multi-megabyte files peak under 200 MB. The whole-file
+path scales with extent times per-cell engine cost; the partitioned path
+scales with formula count (54 here, hence 0.12 s). When a worker aborts, the
+salvage fallback above is what tells these two cases apart: finite work
+shows up as recovered partitioned timings, unbounded work stays an error on
+both sides.
 
 ## The read stage
 
