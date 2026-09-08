@@ -786,35 +786,40 @@ fn seed_occupancy(
     extents: &[RangeAddress],
     batch_cells: &HashSet<u32>,
 ) -> Result<(), String> {
-    for extent in extents {
-        let name = &extent.sheet;
-        let Some(s) = topo
-            .sheets
-            .iter()
-            .position(|i| i.name == *name)
-            .map(|i| i as u16)
-        else {
-            continue;
-        };
-        for r in extent.start_row..=extent.end_row {
-            for c in extent.start_col..=extent.end_col {
-                if let Some(&i) = topo.index.get(&(s, r, c)) {
-                    if !batch_cells.contains(&i) {
-                        wb.set_value(name, r, c, LiteralValue::Number(0.0))
-                            .map_err(|e| e.to_string())?;
+    wb.engine_mut().begin_deferred_dirty();
+    let write = (|| -> Result<(), String> {
+        for extent in extents {
+            let name = &extent.sheet;
+            let Some(s) = topo
+                .sheets
+                .iter()
+                .position(|i| i.name == *name)
+                .map(|i| i as u16)
+            else {
+                continue;
+            };
+            for r in extent.start_row..=extent.end_row {
+                for c in extent.start_col..=extent.end_col {
+                    if let Some(&i) = topo.index.get(&(s, r, c)) {
+                        if !batch_cells.contains(&i) {
+                            wb.set_value(name, r, c, LiteralValue::Number(0.0))
+                                .map_err(|e| e.to_string())?;
+                        }
+                        // A batch formula is placed as a formula below.
+                        continue;
                     }
-                    // A batch formula is placed as a formula below.
-                    continue;
-                }
-                if let Some(v) = store.get(s, r, c) {
-                    if !matches!(v, LiteralValue::Empty) {
-                        wb.set_value(name, r, c, v).map_err(|e| e.to_string())?;
+                    if let Some(v) = store.get(s, r, c) {
+                        if !matches!(v, LiteralValue::Empty) {
+                            wb.set_value(name, r, c, v).map_err(|e| e.to_string())?;
+                        }
                     }
                 }
             }
         }
-    }
-    Ok(())
+        Ok(())
+    })();
+    wb.engine_mut().end_deferred_dirty();
+    write
 }
 
 /// Whether the cells right of and below one anchor hold a value the batch
@@ -998,38 +1003,128 @@ fn copy_inputs(
     ranges: &[RangeRef],
     wb: &mut Workbook,
 ) -> Result<HashSet<(u16, u32, u32)>, String> {
-    // Skips a cell an earlier range already copied.
-    //
-    // This must stay while ranges can overlap. The caller sorts and dedups the
-    // range list, but that collapses only *identical* rectangles: two
-    // overlapping but distinct rectangles, such as `A6:A64` and `A6:A53` from
-    // repeated lookups down one column, still walk the same cells. Dropping
-    // this set requires genuinely disjoint rectangles, which means containment
-    // pruning and then a rectangle union, not a cheaper set type.
-    //
-    // That work was considered and not done. A partitioned run's time is in
-    // formula placement and evaluation inside the engine, not in this copy
-    // (measured: 7540 ms of run against 390 ms of topology build on a
-    // 265,587-formula workbook). Before building rectangle merging, measure
-    // `copy_inputs` itself on a batch with a large range union and show that
-    // it is worth the complexity.
+    // Skips a cell an earlier range already copied. Overlapping but distinct
+    // rectangles (A6:A64 and A6:A53) still walk the same cells.
     let mut seen: HashSet<(u16, u32, u32)> = HashSet::new();
-    let mut failed = None;
+    let mut by_sheet: BTreeMap<u16, BTreeMap<u32, Vec<(u32, LiteralValue)>>> = BTreeMap::new();
     for &(s, r0, c0, r1, c1) in ranges {
-        let name = &topo.sheets[s as usize].name;
         store.for_range(s, r0, c0, r1, c1, |r, c, v| {
-            if failed.is_some() || !seen.insert((s, r, c)) {
-                return;
-            }
-            if let Err(e) = wb.set_value(name, r, c, v) {
-                failed = Some(e.to_string());
+            if seen.insert((s, r, c)) {
+                by_sheet.entry(s).or_default().entry(r).or_default().push((c, v));
             }
         });
     }
-    match failed {
-        Some(e) => Err(e),
-        None => Ok(seen),
+    for row in by_sheet.values_mut().flat_map(|rows| rows.values_mut()) {
+        row.sort_unstable_by_key(|&(c, _)| c);
     }
+
+    let mut dense: Vec<u16> = Vec::new();
+    let mut sparse: Vec<u16> = Vec::new();
+    for (&s, rows) in &by_sheet {
+        let n: u64 = rows.values().map(|c| c.len() as u64).sum();
+        let max_row = *rows.keys().max().unwrap_or(&1);
+        let max_col = rows
+            .values()
+            .flatten()
+            .map(|&(c, _)| c)
+            .max()
+            .unwrap_or(1);
+        let area = max_row as u64 * max_col as u64;
+        // Packed A1-origin rectangles append row-by-row. Anything looser uses
+        // an empty Arrow sheet plus overlay writes so holes stay unallocated
+        // (COUNTBLANK / RSS).
+        if area > 0 && n == area {
+            dense.push(s);
+        } else {
+            sparse.push(s);
+        }
+    }
+
+    if !dense.is_empty() {
+        let mut ab = wb.engine_mut().begin_bulk_ingest_arrow();
+        for s in dense {
+            let name = &topo.sheets[s as usize].name;
+            let rows = &by_sheet[&s];
+            let max_row = *rows.keys().max().unwrap_or(&1);
+            let max_col = rows
+                .values()
+                .flatten()
+                .map(|&(c, _)| c)
+                .max()
+                .unwrap_or(1) as usize;
+            ab.add_sheet(name, max_col, 32 * 1024);
+            let mut buf = vec![LiteralValue::Empty; max_col];
+            for r in 1..=max_row {
+                buf.fill(LiteralValue::Empty);
+                if let Some(cols) = rows.get(&r) {
+                    for &(c, ref v) in cols {
+                        buf[(c - 1) as usize] = v.clone();
+                    }
+                }
+                ab.append_row(name, &buf).map_err(|e| e.to_string())?;
+            }
+        }
+        ab.finish().map_err(|e| e.to_string())?;
+    }
+
+    if !sparse.is_empty() {
+        {
+            let mut ab = wb.engine_mut().begin_bulk_ingest_arrow();
+            for &s in &sparse {
+                let name = &topo.sheets[s as usize].name;
+                let max_col = by_sheet[&s]
+                    .values()
+                    .flatten()
+                    .map(|&(c, _)| c)
+                    .max()
+                    .unwrap_or(1) as usize;
+                ab.add_sheet(name, max_col.max(1), 32 * 1024);
+            }
+            ab.finish().map_err(|e| e.to_string())?;
+        }
+        // Overlay does not stamp DATE/DATETIME formats. `set_value` does, and
+        // that is what makes `C2+1` a Date rather than a serial Number.
+        let mut temporal: Vec<(u16, u32, u32, LiteralValue)> = Vec::new();
+        let mut ub = wb.engine_mut().begin_bulk_update_arrow();
+        for s in sparse {
+            let name = topo.sheets[s as usize].name.clone();
+            let Some(rows) = by_sheet.remove(&s) else {
+                continue;
+            };
+            for (r, cols) in rows {
+                for (c, v) in cols {
+                    if matches!(
+                        v,
+                        LiteralValue::Date(_)
+                            | LiteralValue::DateTime(_)
+                            | LiteralValue::Time(_)
+                            | LiteralValue::Duration(_)
+                    ) {
+                        temporal.push((s, r, c, v));
+                    } else {
+                        ub.update_cell(&name, r, c, v);
+                    }
+                }
+            }
+        }
+        ub.finish().map_err(|e| e.to_string())?;
+        if !temporal.is_empty() {
+            wb.engine_mut().begin_deferred_dirty();
+            let mut failed = None;
+            for (s, r, c, v) in temporal {
+                let name = &topo.sheets[s as usize].name;
+                if let Err(e) = wb.set_value(name, r, c, v) {
+                    failed = Some(e.to_string());
+                    break;
+                }
+            }
+            wb.engine_mut().end_deferred_dirty();
+            if let Some(e) = failed {
+                return Err(e);
+            }
+        }
+    }
+    Ok(seen)
 }
 
 // ---------------------------------------------------------------------------
@@ -1245,15 +1340,13 @@ pub fn plan_scratch(
     // Split the ranges the formulas read: those on the formula sheet give the
     // data columns to load per chunk, and those on other sheets are static
     // inputs that are copied once.
-    let mut data_cols: Vec<u32> = Vec::new();
+    let mut data_col_set: HashSet<u32> = HashSet::new();
     let mut static_ranges: Vec<RangeRef> = Vec::new();
     for refs in &topo.comp_refs {
         for &(s, r0, c0, r1, c1) in refs {
             if s == sheet {
                 for c in c0..=c1 {
-                    if !data_cols.contains(&c) {
-                        data_cols.push(c);
-                    }
+                    data_col_set.insert(c);
                 }
             } else {
                 static_ranges.push((s, r0, c0, r1, c1));
@@ -1261,7 +1354,11 @@ pub fn plan_scratch(
         }
     }
     // A formula column is written as a formula, not as a value.
-    data_cols.retain(|c| !columns.iter().any(|p| p.col == *c));
+    let formula_cols: HashSet<u32> = columns.iter().map(|p| p.col).collect();
+    let mut data_cols: Vec<u32> = data_col_set
+        .into_iter()
+        .filter(|c| !formula_cols.contains(c))
+        .collect();
     data_cols.sort_unstable();
     static_ranges.sort_unstable();
     static_ranges.dedup();
@@ -1281,7 +1378,9 @@ pub fn plan_scratch(
         sheet,
         first_row,
         last_row,
-        chunk_rows: chunk_rows.max(1),
+        // A scratch sheet taller than the formula block would place empty-tail
+        // formulas that still evaluate (e.g. 500 COUNTIFs over a 12-row file).
+        chunk_rows: chunk_rows.max(1).min(last_row - first_row + 1),
         carry,
         columns,
         data_cols,
@@ -1467,38 +1566,48 @@ pub fn run_scratch(
 
         // Carry rows contain plain values. Formula-column values come from the
         // chunk before; data-column values come from the source store.
-        for q in 0..plan.carry {
-            let source_row = start - plan.carry + q;
-            for &c in &plan.carry_cols {
-                let v = match topo.index.get(&(plan.sheet, source_row, c)) {
-                    Some(&i) => values[i as usize].clone(),
-                    None => store
-                        .get(plan.sheet, source_row, c)
-                        .unwrap_or(LiteralValue::Empty),
-                };
-                wb.set_value(&name, q + 1, c, v)
-                    .map_err(|e| e.to_string())?;
+        //
+        // One deferred-dirty scope per chunk: each `set_value` otherwise runs
+        // its own dirty-propagation BFS and CSR rebuild, which is O(cells) per
+        // cell. Batching makes the whole write phase O(cells).
+        wb.engine_mut().begin_deferred_dirty();
+        let write = (|| -> Result<(), String> {
+            for q in 0..plan.carry {
+                let source_row = start - plan.carry + q;
+                for &c in &plan.carry_cols {
+                    let v = match topo.index.get(&(plan.sheet, source_row, c)) {
+                        Some(&i) => values[i as usize].clone(),
+                        None => store
+                            .get(plan.sheet, source_row, c)
+                            .unwrap_or(LiteralValue::Empty),
+                    };
+                    wb.set_value(&name, q + 1, c, v)
+                        .map_err(|e| e.to_string())?;
+                }
             }
-        }
 
-        // Every needed cell is written on every chunk, including the blanks, so
-        // no value can survive from the chunk before.
-        for t in 1..=plan.chunk_rows {
-            let source_row = start + t - 1;
-            let scratch_row = plan.carry + t;
-            for &c in &plan.data_cols {
-                let v = if source_row <= end {
-                    store
-                        .get(plan.sheet, source_row, c)
-                        .unwrap_or(LiteralValue::Empty)
-                } else {
-                    // The last chunk can be shorter than the scratch sheet.
-                    LiteralValue::Empty
-                };
-                wb.set_value(&name, scratch_row, c, v)
-                    .map_err(|e| e.to_string())?;
+            // Every needed cell is written on every chunk, including the blanks,
+            // so no value can survive from the chunk before.
+            for t in 1..=plan.chunk_rows {
+                let source_row = start + t - 1;
+                let scratch_row = plan.carry + t;
+                for &c in &plan.data_cols {
+                    let v = if source_row <= end {
+                        store
+                            .get(plan.sheet, source_row, c)
+                            .unwrap_or(LiteralValue::Empty)
+                    } else {
+                        // The last chunk can be shorter than the scratch sheet.
+                        LiteralValue::Empty
+                    };
+                    wb.set_value(&name, scratch_row, c, v)
+                        .map_err(|e| e.to_string())?;
+                }
             }
-        }
+            Ok(())
+        })();
+        wb.engine_mut().end_deferred_dirty();
+        write?;
 
         wb.evaluate_all().map_err(|e| e.to_string())?;
 
@@ -1726,38 +1835,47 @@ impl ScratchRun {
     /// Write the data values of the window, evaluate it, and put the results
     /// back into the window rows.
     fn evaluate_window(&mut self, start: u32, end: u32) -> Result<(), String> {
-        // A carried formula result is a plain value here. The engine then joins
-        // it to the dependency chain of the formulas below it.
-        for q in 0..self.plan.carry {
-            let source_row = start - self.plan.carry + q;
-            let cells = tail_row(&self.tail, source_row).ok_or_else(|| {
-                format!("row {source_row} is not available for the next chunk")
-            })?;
-            for &c in &self.plan.carry_cols {
-                let v = cell_of(cells, c);
-                self.wb
-                    .set_value(&self.name, q + 1, c, v)
-                    .map_err(|e| e.to_string())?;
+        // One deferred-dirty scope per window: per-cell `set_value` would run a
+        // dirty-propagation BFS and CSR rebuild per cell; batching makes the
+        // whole write phase O(cells).
+        self.wb.engine_mut().begin_deferred_dirty();
+        let write = (|| -> Result<(), String> {
+            // A carried formula result is a plain value here. The engine then
+            // joins it to the dependency chain of the formulas below it.
+            for q in 0..self.plan.carry {
+                let source_row = start - self.plan.carry + q;
+                let cells = tail_row(&self.tail, source_row).ok_or_else(|| {
+                    format!("row {source_row} is not available for the next chunk")
+                })?;
+                for &c in &self.plan.carry_cols {
+                    let v = cell_of(cells, c);
+                    self.wb
+                        .set_value(&self.name, q + 1, c, v)
+                        .map_err(|e| e.to_string())?;
+                }
             }
-        }
 
-        // Every cell the formulas read is written on every chunk, blanks
-        // included, so no value can survive from the chunk before.
-        for t in 1..=self.plan.chunk_rows {
-            let source_row = start + t - 1;
-            let scratch_row = self.plan.carry + t;
-            for &c in &self.plan.data_cols {
-                let v = if source_row <= end {
-                    cell_of(&self.rows[(source_row - start) as usize], c)
-                } else {
-                    // The last chunk can be shorter than the scratch sheet.
-                    LiteralValue::Empty
-                };
-                self.wb
-                    .set_value(&self.name, scratch_row, c, v)
-                    .map_err(|e| e.to_string())?;
+            // Every cell the formulas read is written on every chunk, blanks
+            // included, so no value can survive from the chunk before.
+            for t in 1..=self.plan.chunk_rows {
+                let source_row = start + t - 1;
+                let scratch_row = self.plan.carry + t;
+                for &c in &self.plan.data_cols {
+                    let v = if source_row <= end {
+                        cell_of(&self.rows[(source_row - start) as usize], c)
+                    } else {
+                        // The last chunk can be shorter than the scratch sheet.
+                        LiteralValue::Empty
+                    };
+                    self.wb
+                        .set_value(&self.name, scratch_row, c, v)
+                        .map_err(|e| e.to_string())?;
+                }
             }
-        }
+            Ok(())
+        })();
+        self.wb.engine_mut().end_deferred_dirty();
+        write?;
 
         self.wb.evaluate_all().map_err(|e| e.to_string())?;
 
@@ -1839,7 +1957,7 @@ mod tests {
     use formualizer::workbook::backends::CalamineAdapter;
     use formualizer::workbook::traits::SpreadsheetReader;
     use formualizer::workbook::LoadStrategy;
-    use crate::testkit::{cell_f, cell_s, cell_v, xlsx, xlsx_with_defined_names, xlsx_with_shared_strings};
+    use crate::testkit::{cell_date, cell_f, cell_s, cell_v, xlsx, xlsx_with_defined_names, xlsx_with_shared_strings};
 
     fn shifted(formula: &str, dr: i64, dc: i64) -> String {
         canonical_formula(&shift_ast(&parse(formula).unwrap(), dr, dc))
@@ -2071,6 +2189,162 @@ mod tests {
         have.sort_by_key(|&(r, _)| r);
         let have: Vec<LiteralValue> = have.into_iter().map(|(_, v)| v).collect();
         assert_eq!(have, want, "open-sided lookup must return the matched rows");
+    }
+
+    /// Dense other-sheet inputs take Arrow ingest. SUM must still see those
+    /// values (the corpus regression was 0 instead of the range total).
+    #[test]
+    fn dense_arrow_inputs_are_visible_to_sum() {
+        let data_sheet = format!(
+            "{}{}",
+            cell_v("A1", "10"),
+            cell_v("A2", "20"),
+        );
+        let main = cell_f("B1", "SUM(Data!A1:A2)");
+        let data = xlsx(&[("S", &main), ("Data", &data_sheet)]);
+        assert_eq!(
+            whole_value(&data, "S", 1, 2),
+            Some(LiteralValue::Number(30.0))
+        );
+        let mut topo = topo_of(&data);
+        let store = DataStore::load(&mut topo);
+        let got = run(&store, &topo, DEFAULT_BUDGET_CELLS).expect("components");
+        assert_eq!(got.values, vec![LiteralValue::Number(30.0)]);
+        if let Ok(plan) = plan_scratch(&topo, 500, DEFAULT_LOOKUP_BUDGET) {
+            let stored = run_scratch(&store, &topo, &plan).expect("scratch");
+            assert_eq!(stored.values, vec![LiteralValue::Number(30.0)]);
+        }
+    }
+
+    /// Other-sheet inputs that are not a packed A1 rectangle go through Arrow
+    /// overlay, not per-cell `set_value`. Holes must stay blank.
+    #[test]
+    fn sparse_arrow_holes_stay_blank() {
+        let data_sheet = format!(
+            "{}{}",
+            cell_v("A1", "10"),
+            cell_v("A3", "20"),
+        );
+        let main = format!(
+            "{}{}",
+            cell_f("B1", "SUM(Data!A1:A3)"),
+            cell_f("B2", "COUNTBLANK(Data!A1:A3)"),
+        );
+        let data = xlsx(&[("S", &main), ("Data", &data_sheet)]);
+        assert_eq!(
+            whole_value(&data, "S", 1, 2),
+            Some(LiteralValue::Number(30.0))
+        );
+        assert_eq!(
+            whole_value(&data, "S", 2, 2),
+            Some(LiteralValue::Number(1.0))
+        );
+        let mut topo = topo_of(&data);
+        let store = DataStore::load(&mut topo);
+        let got = run(&store, &topo, DEFAULT_BUDGET_CELLS).expect("components");
+        assert_eq!(
+            got.values,
+            vec![LiteralValue::Number(30.0), LiteralValue::Number(1.0)]
+        );
+        if let Ok(plan) = plan_scratch(&topo, 500, DEFAULT_LOOKUP_BUDGET) {
+            let stored = run_scratch(&store, &topo, &plan).expect("scratch");
+            assert_eq!(
+                stored.values,
+                vec![LiteralValue::Number(30.0), LiteralValue::Number(1.0)]
+            );
+        }
+    }
+
+    #[test]
+    fn same_sheet_dense_sum_matches_whole_file() {
+        let sheet = format!(
+            "{}{}{}{}",
+            cell_v("A1", "10"),
+            cell_v("B1", "20"),
+            cell_v("C1", "30"),
+            cell_f("D1", "SUM(A1:C1)"),
+        );
+        let data = xlsx(&[("S", &sheet)]);
+        assert_eq!(
+            whole_value(&data, "S", 1, 4),
+            Some(LiteralValue::Number(60.0))
+        );
+        let mut topo = topo_of(&data);
+        let store = DataStore::load(&mut topo);
+        let got = run(&store, &topo, DEFAULT_BUDGET_CELLS).expect("components");
+        assert_eq!(got.values, vec![LiteralValue::Number(60.0)]);
+        let plan = plan_scratch(&topo, 500, DEFAULT_LOOKUP_BUDGET).expect("scratch plan");
+        let stored = run_scratch(&store, &topo, &plan).expect("scratch");
+        assert_eq!(stored.values, vec![LiteralValue::Number(60.0)]);
+    }
+
+    /// Overlay writes drop date formats, so `Date+1` became a serial Number.
+    /// A1 and A3 leave a hole, so copy_inputs takes the sparse path.
+    #[test]
+    fn sparse_date_plus_one_keeps_date_type() {
+        let data_sheet = format!(
+            "{}{}",
+            cell_date("A1", "43831"),
+            cell_date("A3", "43832"),
+        );
+        let main = format!(
+            "{}{}",
+            cell_f("B1", "Data!A1+1"),
+            cell_f("B2", "TEXT(Data!A1,\"DD\")"),
+        );
+        let data = xlsx(&[("S", &main), ("Data", &data_sheet)]);
+        let plus = whole_value(&data, "S", 1, 2).expect("whole plus");
+        assert!(
+            matches!(plus, LiteralValue::Date(_)),
+            "whole-file Date+1 must stay a Date, got {plus:?}"
+        );
+        let day = whole_value(&data, "S", 2, 2).expect("whole text");
+        let mut topo = topo_of(&data);
+        let store = DataStore::load(&mut topo);
+        assert!(
+            matches!(store.get(1, 1, 1), Some(LiteralValue::Date(_))),
+            "store must decode the styled serial as a Date"
+        );
+        let got = run(&store, &topo, DEFAULT_BUDGET_CELLS).expect("components");
+        assert_eq!(got.values, vec![plus.clone(), day.clone()]);
+        if let Ok(plan) = plan_scratch(&topo, 500, DEFAULT_LOOKUP_BUDGET) {
+            let stored = run_scratch(&store, &topo, &plan).expect("scratch");
+            assert_eq!(stored.values, vec![plus, day]);
+        }
+    }
+
+    /// SUM of cells that hold formulas must read those results, not empty
+    /// base/Arrow cells. INDEX fills B2/C2; SUM(B2:C2) used to return 0.
+    #[test]
+    fn sum_of_formula_cells_sees_index_results() {
+        let sheet = format!(
+            "{}{}{}{}",
+            cell_v("A2", "1000"),
+            cell_f("B2", "INDEX(A2,1)"),
+            cell_f("C2", "INDEX(A2,1)"),
+            cell_f("D2", "SUM(B2:C2)"),
+        );
+        let data = xlsx(&[("S", &sheet)]);
+        assert_eq!(
+            whole_value(&data, "S", 2, 4),
+            Some(LiteralValue::Number(2000.0))
+        );
+        let mut topo = topo_of(&data);
+        let store = DataStore::load(&mut topo);
+        let got = run(&store, &topo, DEFAULT_BUDGET_CELLS).expect("components");
+        let sum = topo
+            .index
+            .get(&(0, 2, 4))
+            .map(|&i| got.values[i as usize].clone());
+        assert_eq!(sum, Some(LiteralValue::Number(2000.0)));
+        if let Ok(plan) = plan_scratch(&topo, 500, DEFAULT_LOOKUP_BUDGET) {
+            let stored = run_scratch(&store, &topo, &plan).expect("scratch");
+            let sum = topo
+                .index
+                .get(&(0, 2, 4))
+                .map(|&i| stored.values[i as usize].clone());
+            assert_eq!(sum, Some(LiteralValue::Number(2000.0)));
+        }
     }
 
     /// The chunk height must not change the answer, and a height below the row
