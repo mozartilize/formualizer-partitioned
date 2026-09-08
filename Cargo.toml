@@ -29,7 +29,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # what a benchmark measured. Move back to an upstream tag once released.
 # https://github.com/mozartilize/formualizer/tree/fix/bulk-ingest-partial-vertex-set
 git = "https://github.com/mozartilize/formualizer"
-rev = "2be5f57e"
+rev = "1cfb1a31"
 default-features = false
 features = ["common", "parse", "eval", "workbook", "calamine", "system-clock"]
 

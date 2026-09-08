@@ -332,8 +332,8 @@ fn decide(
 /// incomplete and the file must be evaluated whole. A call that two engines
 /// cannot agree on, such as `RAND`, keeps its file whole for the same reason;
 /// `NOW` and `TODAY` do not, because `clock` pins one instant per run.
-/// Workbook-scoped defined names are recreated in per-component batches;
-/// sheet-scoped ones still need the chunked layout.
+/// Fixed defined names, including sheet-scoped names, are recreated in
+/// per-component batches with their original scope and target.
 fn partition_verdict(
     topo: &graph::Topology,
     max_ratio: f64,
@@ -358,15 +358,6 @@ fn partition_verdict(
     }
     if topo.unsupported_refs > 0 {
         return Some("names, tables or 3D references");
-    }
-    if topo.named_refs > 0
-        && !chunk_ok
-        && topo
-            .static_names
-            .iter()
-            .any(|n| n.scope != graph::NameScope::Workbook)
-    {
-        return Some("defined names need the chunked layout");
     }
     if topo.nondeterministic_fns > 0 {
         return Some("unreproducible formulas");
@@ -1137,6 +1128,18 @@ mod tests {
 
     fn topology(data: &[u8]) -> graph::Topology {
         prepare(data, true).topo
+    }
+
+    #[test]
+    fn scoped_fixed_names_use_components() {
+        let data = crate::testkit::xlsx_with_defined_names(
+            &[("Scope", &cell_f("B1", "Local")), ("Target", &cell_v("A1", "7"))],
+            r#"<definedName name="Local" localSheetId="0">Target!$A$1</definedName>"#,
+        );
+        let topo = topology(&data);
+        assert_eq!(topo.named_refs, 1);
+        assert_eq!(partition_verdict(&topo, 1.0, 0, false), None);
+        assert!(partition::plan_scratch(&topo, 100, partition::DEFAULT_LOOKUP_BUDGET).is_err());
     }
 
     #[test]

@@ -199,19 +199,20 @@ Classify cacheable lookups and charge only the scans that the engine must do.
 
 ### Widen defined-name and array-formula support
 
-The chunk layout now accepts a workbook-scoped defined name that targets a
-fixed, fully absolute range on another sheet. Three groups still fall back:
-sheet-scoped names, names that target the formula sheet, and names whose target
-is relative or open-sided.
+The chunk layout accepts workbook-scoped defined names targeting fixed,
+fully absolute ranges on another sheet. The component layout also supports
+sheet-scoped names and targets on formula sheets, preserving name shadowing.
+A sheet-local bare target such as `$A$1` uses its scope sheet. Relative,
+open-sided and non-range definitions remain unsupported.
 
 Array-formula XML annotations no longer force fallback. The pinned whole-file
 loader ignores their declared extents and evaluates ordinary formula text;
 partitioning follows that behavior, not Excel's legacy fixed-array semantics.
 Formulas that can spill use the component layout and whole-file occupancy.
 
-The component layout defines no names, so a file that uses a name must meet the
-whole chunk contract. Copying the targets into each batch workbook would lift
-that limit. See [`bench/README.md`](bench/README.md) for the measured effect.
+Component workbooks recreate names with scope sheets independent of target
+sheets, and include formula dependencies inside named targets. See
+[`bench/README.md`](bench/README.md) for measurements.
 
 ### Drop the backend from the fallback path
 

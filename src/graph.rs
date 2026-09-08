@@ -276,8 +276,8 @@ pub struct Topology {
     pub ast_refs: Vec<Vec<RawRef>>,
     /// Supported fixed-address names that at least one formula uses.
     pub static_names: Vec<StaticName>,
-    /// Number of resolved name references. Components cannot use these until
-    /// their mini-workbooks also define the names.
+    /// Number of resolved name references. Component workbooks recreate
+    /// the used definitions with their original scope and target.
     pub named_refs: u64,
     /// Rows each distinct formula reads in its lookup calls, indexed as
     /// `texts`. See `LOOKUP_FNS` and `Topology::lookup_work`.
@@ -674,7 +674,7 @@ pub fn sheet_parts<R: Read + std::io::Seek>(zip: &mut ZipArchive<R>) -> Vec<(Str
     out
 }
 
-fn parse_defined_target(raw: &str, parts: &[(String, String)]) -> Option<RangeRef> {
+fn parse_defined_target(raw: &str, parts: &[(String, String)], scope: NameScope) -> Option<RangeRef> {
     let text = normalise_target(raw);
     let reference = ReferenceType::from_string(text).ok()?;
     let sheet_index = |name: &str| {
@@ -683,14 +683,21 @@ fn parse_defined_target(raw: &str, parts: &[(String, String)]) -> Option<RangeRe
             .position(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
             .map(|i| i as u16)
     };
+    let target_sheet = |sheet: Option<&str>| match sheet {
+        Some(name) => sheet_index(name),
+        None => match scope {
+            NameScope::Sheet(sheet) => Some(sheet),
+            _ => None,
+        },
+    };
     match reference {
-        ReferenceType::Cell { sheet: Some(sheet), row, col, row_abs, col_abs }
+        ReferenceType::Cell { sheet, row, col, row_abs, col_abs }
             if row > 0 && col > 0 && row_abs && col_abs =>
         {
-            Some((sheet_index(&sheet)?, row, col, row, col))
+            Some((target_sheet(sheet.as_deref())?, row, col, row, col))
         }
         ReferenceType::Range {
-            sheet: Some(sheet),
+            sheet,
             start_row: Some(r0),
             start_col: Some(c0),
             end_row: Some(r1),
@@ -708,7 +715,7 @@ fn parse_defined_target(raw: &str, parts: &[(String, String)]) -> Option<RangeRe
             && end_row_abs
             && end_col_abs =>
         {
-            Some((sheet_index(&sheet)?, r0, c0, r1, c1))
+            Some((target_sheet(sheet.as_deref())?, r0, c0, r1, c1))
         }
         _ => None,
     }
@@ -750,9 +757,27 @@ fn read_defined_names<R: Read + std::io::Seek>(
     let mut buf = Vec::new();
     let mut in_names = false;
     let mut current: Option<(Box<str>, NameScope, String)> = None;
+    // localSheetId indexes workbook.xml, including sheets omitted by
+    // sheet_parts when their relationship is missing. Map by name rather
+    // than letting an omitted part silently shift every later name's scope.
+    let mut scope_sheets = Vec::new();
+    // Only the real workbook sheet list may contribute scope slots. A stray
+    // namespaced `<x:sheet>` from an extension must not inject a slot, and
+    // matching the raw element name keeps this consistent with `sheet_parts`.
+    let mut in_sheets = false;
 
     loop {
         match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) if e.local_name().as_ref() == b"sheets" => in_sheets = true,
+            Ok(Event::End(e)) if e.local_name().as_ref() == b"sheets" => in_sheets = false,
+            Ok(Event::Start(e)) | Ok(Event::Empty(e))
+                if in_sheets && e.name().as_ref() == b"sheet" =>
+            {
+                let name = attr_value(&e, b"name");
+                scope_sheets.push(name.and_then(|name| {
+                    parts.iter().position(|(candidate, _)| candidate == &name).map(|i| i as u16)
+                }));
+            }
             Ok(Event::Start(e)) if e.local_name().as_ref() == b"definedNames" => {
                 in_names = true;
             }
@@ -762,7 +787,9 @@ fn read_defined_names<R: Read + std::io::Seek>(
                     let scope = match attr_value(&e, b"localSheetId") {
                         None => NameScope::Workbook,
                         Some(raw) => match raw.parse::<usize>() {
-                            Ok(i) if i < parts.len() => NameScope::Sheet(i as u16),
+                            Ok(i) if scope_sheets.get(i).copied().flatten().is_some() => {
+                                NameScope::Sheet(scope_sheets[i].unwrap())
+                            }
                             _ => NameScope::Invalid,
                         },
                     };
@@ -784,7 +811,7 @@ fn read_defined_names<R: Read + std::io::Seek>(
                     out.push(DefinedName {
                         name,
                         scope,
-                        target: parse_defined_target(&value, parts),
+                        target: parse_defined_target(&value, parts, scope),
                         missing_sheet: missing_target_sheet(&value, parts),
                     });
                 }
@@ -2148,7 +2175,6 @@ impl Topology {
         self.parse_errors == 0
             && self.xml_formula_cells == self.cells.len() as u64
             && self.unsupported_refs == 0
-            && self.static_names.iter().all(|n| n.scope == NameScope::Workbook)
             && self.nondeterministic_fns == 0
             && self.dynamic_refs == 0
             && self.self_refs == 0
@@ -2667,6 +2693,60 @@ mod tests {
         assert_eq!(t.static_names[0].target, (1, 1, 1, 2, 2));
         assert_eq!(t.lookup_work(), 2);
         assert!(t.is_partitionable());
+    }
+
+    #[test]
+    fn local_names_inherit_the_scope_sheet_for_bare_targets() {
+        let data = xlsx_with_defined_names(
+            &[("First", ""), ("Last", &cell_f("B2", "Local"))],
+            r#"<definedName name="Local" localSheetId="1">$A$1</definedName>"#,
+        );
+        let t = build(&data);
+        assert!(t.is_partitionable());
+        assert_eq!(t.static_names[0].target, (1, 1, 1, 1, 1));
+        assert!(t.static_names[0].scope == NameScope::Sheet(1));
+    }
+
+    #[test]
+    fn omitted_sheet_parts_do_not_shift_local_name_scopes() {
+        let data = xlsx_with_defined_names(
+            &[("First", ""), ("Omitted", ""), ("Last", "")],
+            r#"<definedName name="Local" localSheetId="2">$A$1</definedName>
+               <definedName name="Missing" localSheetId="1">$A$1</definedName>"#,
+        );
+        let mut zip = ZipArchive::new(Cursor::new(&data)).unwrap();
+        // Simulate sheet_parts omitting a sheet with an unresolved r:id.
+        let parts = vec![("First".into(), "first.xml".into()), ("Last".into(), "last.xml".into())];
+        let names = read_defined_names(&mut zip, &parts);
+        assert!(names[0].scope == NameScope::Sheet(1));
+        assert_eq!(names[0].target, Some((1, 1, 1, 1, 1)));
+        assert!(names[1].scope == NameScope::Invalid);
+        assert!(names[1].target.is_none());
+        use formualizer::workbook::{CalamineAdapter, SpreadsheetReader};
+        let mut adapter = CalamineAdapter::open_bytes(data).unwrap();
+        let loaded = adapter.defined_names().unwrap();
+        let local = loaded.iter().find(|n| n.name == "Local").unwrap();
+        assert_eq!(local.scope_sheet.as_deref(), Some(parts[1].0.as_str()));
+    }
+
+    #[test]
+    fn stray_namespaced_sheet_elements_do_not_shift_scopes() {
+        use std::io::Write;
+        let wb = br#"<?xml version="1.0"?><workbook xmlns:x="urn:ext"><ext><x:sheet name="Last"/></ext><sheets><sheet name="First" sheetId="1"/><sheet name="Last" sheetId="2"/></sheets><definedNames><definedName name="Local" localSheetId="1">$A$1</definedName></definedNames></workbook>"#;
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let opts =
+            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        w.start_file("xl/workbook.xml", opts).unwrap();
+        w.write_all(wb).unwrap();
+        let data = w.finish().unwrap().into_inner();
+        let mut zip = ZipArchive::new(Cursor::new(data)).unwrap();
+        let parts = vec![("First".into(), "first.xml".into()), ("Last".into(), "last.xml".into())];
+        let names = read_defined_names(&mut zip, &parts);
+        // localSheetId=1 must select the real "Last" sheet (parts[1]), not the
+        // stray <x:sheet> injected before the sheet list.
+        assert_eq!(names.len(), 1);
+        assert!(names[0].scope == NameScope::Sheet(1));
+        assert_eq!(names[0].target, Some((1, 1, 1, 1, 1)));
     }
 
     #[test]

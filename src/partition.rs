@@ -49,9 +49,9 @@
 //!   a time, so a target on it names rows the chunk does not hold.
 //! - Every coordinate must be absolute. A relative coordinate would move with
 //!   the formula while the copied target does not.
-//! - The scope must be the workbook. `Workbook::define_named_range` binds a
-//!   sheet scope to the target sheet. OOXML `localSheetId` names the sheet the
-//!   name is visible on, which can be a different sheet.
+//! - The scope must be the workbook. Sheet-scoped names use the components
+//!   layout instead, which retains original coordinates and recreates both
+//!   the scope sheet and target sheet, including shadowed names.
 //!
 //! ### Streaming the chunk inputs
 //!
@@ -79,17 +79,22 @@ use formualizer::common::value::LiteralValue;
 use formualizer::common::{CellAddress, RangeAddress};
 use formualizer::eval::engine::inspect::{SnapshotOptions, SpillRole};
 use formualizer::parse::parser::{parse, ASTNode, ASTNodeType, ReferenceType};
-use formualizer::workbook::{NamedRangeScope, Workbook, WorkbookConfig};
+use formualizer::workbook::{Workbook, WorkbookConfig};
 
 use crate::graph::{NameScope, RangeRef, RawRef, StaticName, Topology};
 use crate::values::{SheetStream, Values};
 
-/// Define one workbook-scoped name over its fixed target range.
+/// Define one fixed name without confusing its scope sheet with its target.
 fn define_static_name(wb: &mut Workbook, topo: &Topology, name: &StaticName) -> Result<(), String> {
     let (sheet, r0, c0, r1, c1) = name.target;
     let address = RangeAddress::new(topo.sheets[sheet as usize].name.clone(), r0, c0, r1, c1)
         .map_err(|e| e.to_string())?;
-    wb.define_named_range(&name.name, &address, NamedRangeScope::Workbook)
+    let scope_sheet = match name.scope {
+        NameScope::Workbook => None,
+        NameScope::Sheet(s) => Some(topo.sheets[s as usize].name.as_str()),
+        NameScope::Invalid => return Err("invalid defined-name scope".into()),
+    };
+    wb.define_named_range_scoped(&name.name, &address, scope_sheet)
         .map_err(|e| e.to_string())
 }
 
@@ -621,24 +626,23 @@ fn build_batch_workbook(
         }
     }
     copy_inputs(store, topo, ranges, &mut wb)?;
-    // Workbook-scoped names the formulas use. Their targets were copied
-    // as inputs above, and formula cells inside a target joined the same
-    // component through the dependency union, so they are placed below
-    // rather than read stale. Sheet-scoped names keep the whole-file
-    // fallback (see `partition_verdict`).
-    {
-        let mut defined: HashSet<&str> = HashSet::new();
-        for name in topo.static_names.iter().filter(|n| n.scope == NameScope::Workbook) {
-            if !defined.insert(name.name.as_ref()) {
-                continue;
-            }
-            let (s, ..) = name.target;
+    // Targets read by this batch were copied above; target formulas joined
+    // the consumer's component. static_names is already unique by definition,
+    // not spelling: keep shadowed workbook/local names and create scope sheets
+    // even when they contribute no cells to this batch.
+    for name in &topo.static_names {
+        let (target, ..) = name.target;
+        let scope = match name.scope {
+            NameScope::Sheet(s) => Some(s),
+            _ => None,
+        };
+        for s in std::iter::once(target).chain(scope) {
             if added.insert(s) {
                 wb.add_sheet(&topo.sheets[s as usize].name)
                     .map_err(|e| e.to_string())?;
             }
-            define_static_name(&mut wb, topo, name)?;
         }
+        define_static_name(&mut wb, topo, name)?;
     }
     if !seed_extents.is_empty() {
         let batch_cells: HashSet<u32> = cells.iter().copied().collect();
@@ -2583,6 +2587,41 @@ mod tests {
                             assert_eq!(Some(v.clone()), whole_value(&data, "S", r, c));
                         }
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scoped_names_preserve_shadowing_and_formula_dependencies_across_batches() {
+        let data = xlsx_with_defined_names(
+            &[
+                ("First", &cell_f("B1", "Rate")),
+                ("Scope", &format!("{}{}", cell_v("A1", "3"), cell_f("B1", "Rate+Bare"))),
+                ("Other", &cell_f("B1", "Rate")),
+                ("Target", &format!("{}{}{}", cell_v("A1", "10"), cell_f("B2", "20+22"), cell_v("C3", "9"))),
+            ],
+            r#"<definedName name="Rate">Target!$A$1</definedName>
+               <definedName name="Rate" localSheetId="1">Target!$B$2</definedName>
+               <definedName name="Rate" localSheetId="2">Target!$C$3</definedName>
+               <definedName name="Bare" localSheetId="1">$A$1</definedName>"#,
+        );
+        for fold in [false, true] {
+            for budget in [1, DEFAULT_BUDGET_CELLS] {
+                let mut src = crate::graph::read(&data);
+                if fold { crate::prelude::fold_and_rewrite(&data, &mut src); }
+                let mut topo = crate::graph::build_from(src);
+                assert!(topo.is_partitionable());
+                assert_eq!(topo.static_names.len(), 4);
+                let store = DataStore::load(&mut topo);
+                let got = run(&store, &topo, budget).unwrap();
+                if budget == 1 { assert!(got.n_batches > 1); }
+                for (i, cell) in topo.cells.iter().enumerate() {
+                    let sheet = &topo.sheets[cell.sheet as usize].name;
+                    assert_eq!(Some(got.values[i].clone()), whole_value(&data, sheet, cell.row, cell.col));
+                }
+                for (sheet, expected) in [("First", 10.0), ("Scope", 45.0), ("Other", 9.0)] {
+                    assert_eq!(whole_value(&data, sheet, 1, 2), Some(LiteralValue::Number(expected)));
                 }
             }
         }
