@@ -374,9 +374,6 @@ fn partition_verdict(
     if topo.dynamic_refs > 0 {
         return Some("INDIRECT/OFFSET references");
     }
-    if topo.array_formulas > 0 {
-        return Some("array formulas");
-    }
     if topo.self_refs > 0 {
         return Some("self-referencing formulas");
     }
@@ -1140,6 +1137,18 @@ mod tests {
 
     fn topology(data: &[u8]) -> graph::Topology {
         prepare(data, true).topo
+    }
+
+    #[test]
+    fn array_annotations_do_not_gate_partitioning() {
+        for formula in ["SUM(A1:A3)", "TRANSPOSE(A1:A3)"] {
+            let sheet = format!(
+                r#"<c r="B5"><f t="array" ref="B5:D5">{formula}</f><v>0</v></c>"#
+            );
+            let topo = topology(&xlsx(&[("S", &sheet)]));
+            assert_eq!(topo.array_formulas, 1);
+            assert_eq!(partition_verdict(&topo, 1.0, 0, false), None);
+        }
     }
 
     #[test]

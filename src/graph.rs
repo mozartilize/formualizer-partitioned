@@ -301,9 +301,10 @@ pub struct Topology {
     /// References that only exist at runtime (INDIRECT/OFFSET). Static
     /// partitioning cannot see them, so their presence forces a whole-file run.
     pub dynamic_refs: u64,
-    /// Array formulas (`<f t="array" ref="...">`). Their result spills over a
-    /// range whose extent this reader does not model, and whether a spill is
-    /// blocked depends on neighbouring cells that a mini-workbook may not hold.
+    /// Diagnostic count of `<f t="array" ref="...">` anchors. The pinned
+    /// Calamine loader treats these as ordinary formula text and ignores the
+    /// declared extent. Actual spills use whole-file occupancy, just as for
+    /// formulas without this XML annotation.
     pub array_formulas: u64,
     /// Formulas naming their own cell, such as `A7 =ROW(A7)-6`. A whole-file
     /// load accepts these, but the incremental edit path a mini-workbook is
@@ -2150,7 +2151,6 @@ impl Topology {
             && self.static_names.iter().all(|n| n.scope == NameScope::Workbook)
             && self.nondeterministic_fns == 0
             && self.dynamic_refs == 0
-            && self.array_formulas == 0
             && self.self_refs == 0
     }
 }
@@ -2683,15 +2683,13 @@ mod tests {
         assert_eq!(t.unsupported_refs, 2);
     }
 
-    /// An array formula spills across a range this reader does not model, and
-    /// whether the spill is blocked depends on cells a mini-workbook may not
-    /// contain.
+    /// The XML array annotation is diagnostic, not a partitioning refusal.
     #[test]
-    fn array_formula_is_flagged() {
+    fn array_formula_is_counted_without_gating() {
         let sheet = r#"<c r="B3"><f t="array" ref="B3:D3">SUMPRODUCT(A1:A9)</f><v>0</v></c>"#;
         let t = build(&xlsx(&[("S", sheet)]));
         assert_eq!(t.array_formulas, 1);
-        assert!(!t.is_partitionable());
+        assert!(t.is_partitionable());
     }
 
     /// Error literals have no dependency edge, including a broken sheet prefix.

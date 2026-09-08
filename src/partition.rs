@@ -2545,6 +2545,49 @@ mod tests {
         assert_eq!(whole_value(&free, "S", 2, 2), Some(LiteralValue::Number(10.0)));
     }
 
+    /// Calamine discards the array annotation and its declared extent. Pin
+    /// that behavior: do not expand legacy followers or clear their cached
+    /// values in the partitioned reader. Actual spills use normal occupancy.
+    #[test]
+    fn annotated_arrays_match_whole_file_spills_and_cached_followers() {
+        for extent in ["B2", "B2:B4", "B2:B6"] {
+            for blocked in [false, true] {
+                let sheet = format!(
+                    "{}{}{}{}{}",
+                    cell_v("A1", "10"),
+                    cell_v("A2", "20"),
+                    cell_v("A3", "30"),
+                    format!(r#"<c r="B2"><f t="array" ref="{extent}">INDEX(A1:A3,0)</f><v>999</v></c>"#),
+                    if blocked { cell_v("B3", "999") } else { String::new() },
+                );
+                let data = xlsx(&[("S", &sheet)]);
+                for fold in [false, true] {
+                    let mut src = crate::graph::read(&data);
+                    if fold {
+                        crate::prelude::fold_and_rewrite(&data, &mut src);
+                    }
+                    let mut topo = crate::graph::build_from(src);
+                    assert!(topo.is_partitionable());
+                    let store = DataStore::load(&mut topo);
+                    let result = run(&store, &topo, DEFAULT_BUDGET_CELLS).unwrap();
+                    let expected = if blocked { spill_error() } else { LiteralValue::Number(10.0) };
+                    assert_eq!(result.values[0], expected);
+                    assert_eq!(whole_value(&data, "S", 2, 2), Some(expected));
+                    if blocked {
+                        assert!(result.spilled.is_empty());
+                        assert_eq!(store.get(0, 3, 2), whole_value(&data, "S", 3, 2));
+                    } else {
+                        assert_eq!(result.spilled.len(), 2);
+                        for &(s, r, c, ref v) in &result.spilled {
+                            assert_eq!(s, 0);
+                            assert_eq!(Some(v.clone()), whole_value(&data, "S", r, c));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Engine-behavior guard for the text-criteria ungate: a text criterion
     /// over a numeric range must coerce, and a wildcard must match text
     /// only, on the whole-file path itself. A stale engine revision (one

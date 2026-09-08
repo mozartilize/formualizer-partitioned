@@ -202,7 +202,12 @@ Classify cacheable lookups and charge only the scans that the engine must do.
 The chunk layout now accepts a workbook-scoped defined name that targets a
 fixed, fully absolute range on another sheet. Three groups still fall back:
 sheet-scoped names, names that target the formula sheet, and names whose target
-is relative or open-sided. Array formulas always fall back.
+is relative or open-sided.
+
+Array-formula XML annotations no longer force fallback. The pinned whole-file
+loader ignores their declared extents and evaluates ordinary formula text;
+partitioning follows that behavior, not Excel's legacy fixed-array semantics.
+Formulas that can spill use the component layout and whole-file occupancy.
 
 The component layout defines no names, so a file that uses a name must meet the
 whole chunk contract. Copying the targets into each batch workbook would lift
