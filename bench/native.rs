@@ -47,20 +47,10 @@ fn decide(
         Some("too few formulas to be worth splitting")
     } else if topo.unsupported_refs > 0 {
         Some("names, tables or 3D references")
-    } else if topo.named_refs > 0
-        && plan.is_err()
-        && topo
-            .static_names
-            .iter()
-            .any(|n| n.scope != graph::NameScope::Workbook)
-    {
-        Some("defined names need the chunked layout")
     } else if topo.nondeterministic_fns > 0 {
         Some("unreproducible formulas")
     } else if topo.dynamic_refs > 0 {
         Some("INDIRECT/OFFSET references")
-    } else if topo.array_formulas > 0 {
-        Some("array formulas")
     } else if topo.self_refs > 0 {
         Some("self-referencing formulas")
     } else if plan.is_err()
@@ -1076,6 +1066,13 @@ pub fn worker(
                 let start = Instant::now();
                 let output = consume(data, mode, min_formulas);
                 result[mode] = json!(start.elapsed().as_secs_f64());
+                // `ru_maxrss` is a high-water mark over the process lifetime.
+                // Whole runs first, so its peak is read in isolation. The
+                // partitioned read is a ceiling: it only rises above whole's
+                // peak when partitioning actually uses more memory. Exact
+                // per-mode peaks come from the separate-process memory phase.
+                let peak = crate::peak_mb().map_err(|e| ("peak_rss", e))?;
+                result[format!("{mode}_peak_mb")] = json!(peak);
                 match output {
                     Ok(output) => result[format!("{mode}_output")] = output,
                     Err(reason) => {

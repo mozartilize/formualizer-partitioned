@@ -686,13 +686,33 @@ dependencies = [
 [[package]]
 name = "formualizer"
 version = "0.9.0"
+source = "git+https://github.com/mozartilize/formualizer?rev=1cfb1a31#1cfb1a31f469ef432a6f5db26d42a4c27c3b023b"
+dependencies = [
+ "formualizer-common 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
+ "formualizer-eval 0.9.0 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
+ "formualizer-parse 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
+ "formualizer-sheetport 0.9.0 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
+ "formualizer-workbook 0.9.0 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
+]
+
+[[package]]
+name = "formualizer"
+version = "0.9.0"
 source = "git+https://github.com/mozartilize/formualizer?rev=2be5f57e#2be5f57e502923c6b8d4d7b0a108da4d7ceb88a2"
 dependencies = [
- "formualizer-common",
- "formualizer-eval",
- "formualizer-parse",
- "formualizer-sheetport",
- "formualizer-workbook",
+ "formualizer-common 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
+ "formualizer-eval 0.9.0 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
+ "formualizer-parse 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
+ "formualizer-sheetport 0.9.0 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
+ "formualizer-workbook 0.9.0 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
+]
+
+[[package]]
+name = "formualizer-common"
+version = "3.1.1"
+source = "git+https://github.com/mozartilize/formualizer?rev=1cfb1a31#1cfb1a31f469ef432a6f5db26d42a4c27c3b023b"
+dependencies = [
+ "chrono",
 ]
 
 [[package]]
@@ -701,6 +721,31 @@ version = "3.1.1"
 source = "git+https://github.com/mozartilize/formualizer?rev=2be5f57e#2be5f57e502923c6b8d4d7b0a108da4d7ceb88a2"
 dependencies = [
  "chrono",
+]
+
+[[package]]
+name = "formualizer-eval"
+version = "0.9.0"
+source = "git+https://github.com/mozartilize/formualizer?rev=1cfb1a31#1cfb1a31f469ef432a6f5db26d42a4c27c3b023b"
+dependencies = [
+ "arrow",
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-cast",
+ "arrow-schema",
+ "arrow-select",
+ "bitflags",
+ "bumpalo",
+ "chrono",
+ "dashmap",
+ "formualizer-common 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
+ "formualizer-macros 0.9.0 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
+ "formualizer-parse 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
+ "once_cell",
+ "rand",
+ "rayon",
+ "rustc-hash",
+ "smallvec",
 ]
 
 [[package]]
@@ -718,9 +763,9 @@ dependencies = [
  "bumpalo",
  "chrono",
  "dashmap",
- "formualizer-common",
- "formualizer-macros",
- "formualizer-parse",
+ "formualizer-common 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
+ "formualizer-macros 0.9.0 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
+ "formualizer-parse 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
  "once_cell",
  "rand",
  "rayon",
@@ -731,9 +776,20 @@ dependencies = [
 [[package]]
 name = "formualizer-macros"
 version = "0.9.0"
+source = "git+https://github.com/mozartilize/formualizer?rev=1cfb1a31#1cfb1a31f469ef432a6f5db26d42a4c27c3b023b"
+dependencies = [
+ "formualizer-common 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "formualizer-macros"
+version = "0.9.0"
 source = "git+https://github.com/mozartilize/formualizer?rev=2be5f57e#2be5f57e502923c6b8d4d7b0a108da4d7ceb88a2"
 dependencies = [
- "formualizer-common",
+ "formualizer-common 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -742,9 +798,19 @@ dependencies = [
 [[package]]
 name = "formualizer-parse"
 version = "3.1.1"
+source = "git+https://github.com/mozartilize/formualizer?rev=1cfb1a31#1cfb1a31f469ef432a6f5db26d42a4c27c3b023b"
+dependencies = [
+ "formualizer-common 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
+ "once_cell",
+ "smallvec",
+]
+
+[[package]]
+name = "formualizer-parse"
+version = "3.1.1"
 source = "git+https://github.com/mozartilize/formualizer?rev=2be5f57e#2be5f57e502923c6b8d4d7b0a108da4d7ceb88a2"
 dependencies = [
- "formualizer-common",
+ "formualizer-common 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
  "once_cell",
  "smallvec",
 ]
@@ -755,7 +821,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "flate2",
- "formualizer",
+ "formualizer 0.9.0 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
  "pyo3",
  "quick-xml 0.37.5",
  "zip 2.4.2",
@@ -764,18 +830,56 @@ dependencies = [
 [[package]]
 name = "formualizer-sheetport"
 version = "0.9.0"
-source = "git+https://github.com/mozartilize/formualizer?rev=2be5f57e#2be5f57e502923c6b8d4d7b0a108da4d7ceb88a2"
+source = "git+https://github.com/mozartilize/formualizer?rev=1cfb1a31#1cfb1a31f469ef432a6f5db26d42a4c27c3b023b"
 dependencies = [
  "chrono",
- "formualizer-common",
- "formualizer-eval",
- "formualizer-parse",
- "formualizer-workbook",
+ "formualizer-common 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
+ "formualizer-eval 0.9.0 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
+ "formualizer-parse 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
+ "formualizer-workbook 0.9.0 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
  "regex",
  "serde",
  "serde_json",
- "sheetport-spec",
+ "sheetport-spec 0.3.1 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
  "thiserror",
+]
+
+[[package]]
+name = "formualizer-sheetport"
+version = "0.9.0"
+source = "git+https://github.com/mozartilize/formualizer?rev=2be5f57e#2be5f57e502923c6b8d4d7b0a108da4d7ceb88a2"
+dependencies = [
+ "chrono",
+ "formualizer-common 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
+ "formualizer-eval 0.9.0 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
+ "formualizer-parse 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
+ "formualizer-workbook 0.9.0 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
+ "regex",
+ "serde",
+ "serde_json",
+ "sheetport-spec 0.3.1 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
+ "thiserror",
+]
+
+[[package]]
+name = "formualizer-workbook"
+version = "0.9.0"
+source = "git+https://github.com/mozartilize/formualizer?rev=1cfb1a31#1cfb1a31f469ef432a6f5db26d42a4c27c3b023b"
+dependencies = [
+ "calamine",
+ "chrono",
+ "formualizer-common 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
+ "formualizer-eval 0.9.0 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
+ "formualizer-parse 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=1cfb1a31)",
+ "memmap2",
+ "once_cell",
+ "parking_lot",
+ "quick-xml 0.39.4",
+ "rustc-hash",
+ "serde",
+ "tempfile",
+ "thiserror",
+ "zip 7.2.0",
 ]
 
 [[package]]
@@ -785,9 +889,9 @@ source = "git+https://github.com/mozartilize/formualizer?rev=2be5f57e#2be5f57e50
 dependencies = [
  "calamine",
  "chrono",
- "formualizer-common",
- "formualizer-eval",
- "formualizer-parse",
+ "formualizer-common 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
+ "formualizer-eval 0.9.0 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
+ "formualizer-parse 3.1.1 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
  "memmap2",
  "once_cell",
  "parking_lot",
@@ -1166,7 +1270,7 @@ checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
 name = "probes"
 version = "0.1.0"
 dependencies = [
- "formualizer",
+ "formualizer 0.9.0 (git+https://github.com/mozartilize/formualizer?rev=2be5f57e)",
  "formualizer-partitioned",
 ]
 
@@ -1527,6 +1631,22 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "sheetport-spec"
+version = "0.3.1"
+source = "git+https://github.com/mozartilize/formualizer?rev=1cfb1a31#1cfb1a31f469ef432a6f5db26d42a4c27c3b023b"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "regex",
+ "schemars",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]

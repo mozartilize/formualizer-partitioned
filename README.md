@@ -19,8 +19,8 @@ in the last floating-point digit (see "Prelude folding" in
 
 The current pipeline loads a workbook, evaluates it whole, and returns every
 cell to Python. Peak memory scales with the sheet extent, which is what pushes
-the Lambda memory setting up. A 1.1 MB file with a 15163x12 sheet peaks at
-180 MB.
+the Lambda memory setting up. A 170 KB workbook whose formulas read a full
+column peaks at 117 MB evaluated whole, and 8.8 MB when split.
 
 Most spreadsheets are not one large calculation. They are thousands of small,
 independent calculations. Each row computes from its own inputs. The evaluator
@@ -95,6 +95,11 @@ fallback order is:
 2. Try the `components` layout (any shape the dependency closure allows).
 3. Use the whole-file path.
 
+Workbook-scoped names that resolve to fixed ranges are copied into both
+layouts. The component layout also recreates sheet-scoped names, including
+shadowed pairs. Array-formula XML no longer forces fallback: the loader
+ignores declared array extents, and partitioning follows that.
+
 Only `eval_rows`, and only on the `partitioned` layout, can stream its input
 rows. The `components` layout and chunk files whose sheet cannot stream read
 values through a preloaded store; the whole-file path reads the evaluated
@@ -135,11 +140,12 @@ workbook.
 6. **Evaluate.** Use one reused chunk workbook for row chunks, or use one new
    workbook for each component batch. Both layouts are safe. Every formula
    that a component reads is inside that component. Every other input is a
-   copied data cell.
+   copied data cell. A chunk workbook is only as tall as the formula block
+   (capped at 500 rows). Packed tables copy through Arrow ingest; holes stay
+   unallocated.
 
 7. **Place the formulas in bulk.** Send each component group to the engine in
-   one bulk ingest call, not one call per cell. See "Placing the formulas" in
-   [`bench/README.md`](bench/README.md).
+   one bulk ingest call, not one call per cell.
 
 The Rust module docs contain the implementation contracts:
 
@@ -147,21 +153,32 @@ The Rust module docs contain the implementation contracts:
 - [`src/partition.rs`](src/partition.rs) documents the chunk layout's contract,
   streamed inputs and lookup limits.
 - [`src/prelude.rs`](src/prelude.rs) documents aggregate folding.
+- [`docs/partition-eval.md`](docs/partition-eval.md) documents mini-workbook
+  copy and eval rules (Arrow ingest, dates, chunk height).
 
-A private, underscore-named `_benchmark_rows(data, mode="streamed"|"scratch"|
-"components"|"whole"|"auto")` entry point exists so `bench/bench_scratch.py`
-can force one layout at a time for measurement. It is not part of the public
-contract: a forced mode fails with a clear error when the file does not
-qualify for it, rather than silently running a different layout. Its report
-dict names the mode that actually ran (`selected_mode` distinguishes streamed
-from store-fed chunk runs, which `rows.strategy` merges into `partitioned`),
-why a faster layout or the row stream was refused, the component-batch
-estimate, and the chunk-plan stats.
+A private `_benchmark_rows(data, mode="streamed"|"components"|"whole"|"auto")`
+entry point exists so `bench/bench_scratch.py` can force one layout at a time.
+It is not part of the public contract: a forced mode fails when the file does
+not qualify, rather than silently running a different layout. `streamed` is
+the chunk layout with inputs read from the file; if that sheet cannot stream,
+`auto` evaluates the same chunks from a preloaded store. `rows.strategy`
+merges both into `partitioned`; the report's `selected_mode` tells them apart.
 
 ## Measurements
 
-See [`bench/README.md`](bench/README.md) for benchmark methods, results and
-tuning data.
+Native Rust versus Formualizer whole-file, `min_formulas=0` (every eligible
+file is split). Method: [`bench/README.md`](bench/README.md).
+
+| | SSB (826 files) | Sheetpedia (197 files) |
+|---|---|---|
+| time median | 0.71× | 0.84× |
+| time p90 | 1.50× | 1.70× |
+| total time | 51 s → 30 s | 2.7 s → 3.4 s |
+| whole-file RSS median | 12.4 MiB | 12.7 MiB |
+
+A full-column Sheetpedia file (0913, 149 formulas, 170 KB on disk): **117 MiB → 8.8 MiB** (13×) and 91 ms → 56 ms. An SSB file with a 4.7 M-cell extent (34493): **2.1 s → 0.24 s**.
+
+Values match Formualizer except one pre-existing Sheetpedia sheet-set mismatch (0944).
 
 ## Building for AWS Lambda
 
@@ -185,50 +202,4 @@ Amazon Linux 2 rejects a wheel when its bundled ELF library contains misaligned
 This crate's `.so` has four `PT_LOAD` segments. All satisfy
 `(vaddr - offset) % align == 0` at `align=0x1000`.
 
-## Possible improvements
-
-### Make the lookup budget cache-aware
-
-Formualizer already builds a bounded index for repeated exact lookups. It still
-scans lookup ranges that use approximate or wildcard matching. It can also skip
-the index for small, volatile, invalid or over-budget ranges.
-
-`Topology::lookup_work` currently charges every lookup as a full table scan.
-The chunk layout can therefore reject a file whose exact lookups use the index.
-Classify cacheable lookups and charge only the scans that the engine must do.
-
-### Widen defined-name and array-formula support
-
-The chunk layout accepts workbook-scoped defined names targeting fixed,
-fully absolute ranges on another sheet. The component layout also supports
-sheet-scoped names and targets on formula sheets, preserving name shadowing.
-A sheet-local bare target such as `$A$1` uses its scope sheet. Relative,
-open-sided and non-range definitions remain unsupported.
-
-Array-formula XML annotations no longer force fallback. The pinned whole-file
-loader ignores their declared extents and evaluates ordinary formula text;
-partitioning follows that behavior, not Excel's legacy fixed-array semantics.
-Formulas that can spill use the component layout and whole-file occupancy.
-
-Component workbooks recreate names with scope sheets independent of target
-sheets, and include formula dependencies inside named targets. See
-[`bench/README.md`](bench/README.md) for measurements.
-
-### Drop the backend from the fallback path
-
-The XML reader supplies values, but the fallback path still uses the calamine
-backend to load the whole workbook. Most real files use this path. A direct
-loader could reduce fallback memory, but it must also load every formula feature
-that can cause a fallback, including names and arrays. Keep `eval_grid` on the
-calamine path as the correctness baseline.
-
-### Flatten the component lists
-
-`comp_cells` and `comp_refs` are vectors of vectors, one per component, so a file
-with 30325 components makes ~60k small heap allocations. A CSR layout (flat array
-plus offsets) would remove them.
-
-This improvement has low priority because the saving is small. The headers use
-1.4 MB, against a topology of 10-12 MB and a run of 62-70 MB. The improvement
-would reduce the allocation count, not the byte count.
 

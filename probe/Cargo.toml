@@ -39,6 +39,14 @@ path = "splitprobe.rs"
 name = "textcrit"
 path = "textcrit.rs"
 
+[[bin]]
+name = "refprobe"
+path = "refprobe.rs"
+
+[[bin]]
+name = "chunkprobe"
+path = "chunkprobe.rs"
+
 [dependencies.formualizer]
 # Keep this revision in step with the library manifest. A probe that measures a
 # different engine than the library builds against reports nothing useful.

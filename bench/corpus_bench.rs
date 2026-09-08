@@ -152,7 +152,7 @@ fn limits(memory_mb: u64) -> Result<(), String> {
     Ok(())
 }
 
-fn peak_mb() -> Result<f64, String> {
+pub(crate) fn peak_mb() -> Result<f64, String> {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
     // SAFETY: getrusage initializes usage on success; no read occurs on failure.
     if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
@@ -655,6 +655,23 @@ fn sweep(args: Args) -> Result<i32, String> {
             pct(&extents, 0.9),
             pct(&extents, 1.0)
         );
+        // Whole-side peak RSS captured per file during the speed worker. The
+        // memory phase (separate processes) stays authoritative for per-mode
+        // comparison; this is the isolated whole-file peak plus the combined
+        // process high-water mark.
+        let whole_peaks: Vec<_> = rows
+            .iter()
+            .filter(|r| number(r, "whole_peak_mb") > 0.0)
+            .map(|r| number(r, "whole_peak_mb"))
+            .collect();
+        if !whole_peaks.is_empty() {
+            println!(
+                "   whole peak RSS MiB: median {:.1}   p90 {:.1}   max {:.1}",
+                median(&whole_peaks),
+                pct(&whole_peaks, 0.9),
+                pct(&whole_peaks, 1.0)
+            );
+        }
     }
     if args.check {
         println!("CORRECTNESS  exact native comparison with Formualizer whole-file: {checks:?}");
