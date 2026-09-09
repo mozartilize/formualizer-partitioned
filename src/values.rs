@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Cursor, Read, Seek};
 use std::rc::Rc;
 
+use chrono::{Duration as ChronoDuration, NaiveTime};
 use flate2::read::DeflateDecoder;
 use formualizer::common::error::{ExcelError, ExcelErrorKind};
 use formualizer::common::value::{DateSystem, LiteralValue};
@@ -31,13 +32,25 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 use zip::{CompressionMethod, ZipArchive};
 
+/// What a number format renders, mirroring the backend's `CellFormat`.
+///
+/// `DateTime` covers date, time-of-day, and date+time; the serial value, not
+/// the format, decides among `Date`/`Time`/`DateTime` on read. `TimeDelta` is
+/// an elapsed-time (`[h]`-style) format, which reads as a `Duration`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CellFormat {
+    Other,
+    DateTime,
+    TimeDelta,
+}
+
 /// Does this number format render a date, a time, or an elapsed time?
 ///
 /// Ported from the backend's reader so that the two agree on which numbers are
 /// dates. A format is a date when an unquoted, unescaped, unbracketed `d`, `m`,
 /// `h`, `y` or `s` appears in its first section, or when `[h]`-style elapsed
 /// time is used. Only the first section counts: `;` ends the scan.
-fn is_date_format(format: &str) -> bool {
+fn detect_format(format: &str) -> CellFormat {
     let mut escaped = false;
     let mut is_quote = false;
     let mut brackets = 0u8;
@@ -53,14 +66,14 @@ fn is_date_format(format: &str) -> bool {
             ('"', _, true, _, _) => is_quote = false,
             (_, _, true, _, _) => (),
             ('"', _, _, _, _) => is_quote = true,
-            (';', ..) => return false,
+            (';', ..) => return CellFormat::Other,
             ('[', ..) => brackets += 1,
-            (']', .., 1) if hms => return true,
+            (']', .., 1) if hms => return CellFormat::TimeDelta,
             (']', ..) => brackets = brackets.saturating_sub(1),
             ('a' | 'A', _, _, false, 0) => ap = true,
-            ('p' | 'm' | '/' | 'P' | 'M', _, _, true, 0) => return true,
+            ('p' | 'm' | '/' | 'P' | 'M', _, _, true, 0) => return CellFormat::DateTime,
             ('d' | 'm' | 'h' | 'y' | 's' | 'D' | 'M' | 'H' | 'Y' | 'S', _, _, false, 0) => {
-                return true
+                return CellFormat::DateTime
             }
             _ => {
                 if !(hms && s.eq_ignore_ascii_case(&prev)) {
@@ -70,17 +83,24 @@ fn is_date_format(format: &str) -> bool {
         }
         prev = s;
     }
-    false
+    CellFormat::Other
+}
+
+/// Backwards view used by callers that only care about date-vs-not.
+fn is_date_format(format: &str) -> bool {
+    detect_format(format) != CellFormat::Other
 }
 
 /// Date formats built into the format, matched on the raw attribute bytes so
 /// that a padded or non-canonical id misses here exactly as it does upstream.
-fn builtin_is_date(id: &[u8]) -> bool {
-    matches!(
-        id,
-        b"14" | b"15" | b"16" | b"17" | b"18" | b"19" | b"20" | b"21" | b"22" | b"45" | b"46"
-            | b"47"
-    )
+fn builtin_format(id: &[u8]) -> CellFormat {
+    match id {
+        b"14" | b"15" | b"16" | b"17" | b"18" | b"19" | b"20" | b"21" | b"22" | b"45"
+        | b"47" => CellFormat::DateTime,
+        // `[h]:mm:ss` — elapsed time.
+        b"46" => CellFormat::TimeDelta,
+        _ => CellFormat::Other,
+    }
 }
 
 fn error_kind(v: &str) -> ExcelErrorKind {
@@ -226,8 +246,8 @@ pub fn read_text_element<R: std::io::BufRead>(rdr: &mut Reader<R>, closing: &[u8
 /// Workbook-level tables a sheet's cells refer to.
 pub struct Values {
     strings: Vec<Box<str>>,
-    /// One entry per `cellXfs` record: does that format render a date?
-    date_formats: Vec<bool>,
+    /// One entry per `cellXfs` record: what that format renders.
+    date_formats: Vec<CellFormat>,
 }
 
 /// A data value in compact form.
@@ -283,16 +303,46 @@ impl Values {
         }
     }
 
-    fn is_date(&self, style: Option<&[u8]>) -> bool {
+    fn format_of(&self, style: Option<&[u8]>) -> CellFormat {
         match style {
             // A cell without a style carries the default format, which is not a
             // date. An index past the table is treated the same way.
-            None => false,
+            None => CellFormat::Other,
             Some(s) => std::str::from_utf8(s)
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
                 .and_then(|i| self.date_formats.get(i).copied())
-                .unwrap_or(false),
+                .unwrap_or(CellFormat::Other),
+        }
+    }
+
+    /// A numeric cell whose format renders a date, time, or elapsed time.
+    ///
+    /// Mirrors the backend's `data_ref_format` classification plus the
+    /// engine's temporal egress, so a time-only serial reads as `Time`, an
+    /// elapsed-time format reads as `Duration`, and a date+time reads as
+    /// `DateTime`, exactly as a whole-file run does.
+    fn temporal(&self, style: Option<&[u8]>, n: f64) -> LiteralValue {
+        match self.format_of(style) {
+            CellFormat::DateTime if (0.0..1.0).contains(&n) => {
+                let seconds = (n.rem_euclid(1.0) * 86_400.0).round() as u32 % 86_400;
+                NaiveTime::from_num_seconds_from_midnight_opt(seconds, 0)
+                    .map(LiteralValue::Time)
+                    .unwrap_or(LiteralValue::Number(n))
+            }
+            CellFormat::DateTime => {
+                LiteralValue::try_from_serial_number_for(DateSystem::Excel1900, n)
+                    .unwrap_or_else(LiteralValue::Error)
+            }
+            CellFormat::TimeDelta => {
+                let nanos = (n * 86_400.0 * 1_000_000_000.0).round();
+                if nanos.is_finite() && nanos >= i64::MIN as f64 && nanos <= i64::MAX as f64 {
+                    LiteralValue::Duration(ChronoDuration::nanoseconds(nanos as i64))
+                } else {
+                    LiteralValue::Number(n)
+                }
+            }
+            CellFormat::Other => LiteralValue::Number(n),
         }
     }
 
@@ -323,11 +373,7 @@ impl Values {
                     return None;
                 }
                 match v.parse::<f64>() {
-                    Ok(n) if self.is_date(style) => Some(
-                        LiteralValue::try_from_serial_number_for(DateSystem::Excel1900, n)
-                            .unwrap_or_else(LiteralValue::Error),
-                    ),
-                    Ok(n) => Some(LiteralValue::Number(n)),
+                    Ok(n) => Some(self.temporal(style, n)),
                     // An untyped cell holding something unparseable is text;
                     // one explicitly numeric is malformed and has no value.
                     Err(_) if ty.is_none() => Some(LiteralValue::Text(v.to_string())),
@@ -537,8 +583,8 @@ fn read_shared_strings<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Vec<Box<str>>
 ///
 /// Only `<xf>` records inside `<cellXfs>` count; the ones in `<cellStyleXfs>`
 /// describe named styles and are not what a cell's `s` attribute indexes.
-fn read_date_formats<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Vec<bool> {
-    let mut custom: HashMap<Vec<u8>, bool> = HashMap::new();
+fn read_date_formats<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Vec<CellFormat> {
+    let mut custom: HashMap<Vec<u8>, CellFormat> = HashMap::new();
     let mut out = Vec::new();
     let file = match zip.by_name("xl/styles.xml") {
         Ok(f) => f,
@@ -558,19 +604,19 @@ fn read_date_formats<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Vec<bool> {
                         let code = quick_xml::escape::unescape(&String::from_utf8_lossy(&code))
                             .map(|c| c.into_owned())
                             .unwrap_or_default();
-                        custom.insert(id, is_date_format(&code));
+                        custom.insert(id, detect_format(&code));
                     }
                 }
                 b"cellXfs" => in_cell_xfs = true,
                 b"xf" if in_cell_xfs => {
-                    let is_date = match raw_attr(&e, b"numFmtId") {
+                    let cell_format = match raw_attr(&e, b"numFmtId") {
                         Some(id) => match custom.get(&id) {
                             Some(&flag) => flag,
-                            None => builtin_is_date(&id),
+                            None => builtin_format(&id),
                         },
-                        None => false,
+                        None => CellFormat::Other,
                     };
-                    out.push(is_date);
+                    out.push(cell_format);
                 }
                 _ => (),
             },
@@ -618,13 +664,22 @@ mod tests {
 
     #[test]
     fn builtin_date_ids_match_on_raw_bytes() {
-        assert!(builtin_is_date(b"14"));
-        assert!(builtin_is_date(b"22"));
-        assert!(builtin_is_date(b"46"));
-        assert!(!builtin_is_date(b"0"));
-        assert!(!builtin_is_date(b"23"));
+        assert_eq!(builtin_format(b"14"), CellFormat::DateTime);
+        assert_eq!(builtin_format(b"22"), CellFormat::DateTime);
+        assert_eq!(builtin_format(b"46"), CellFormat::TimeDelta);
+        assert_eq!(builtin_format(b"0"), CellFormat::Other);
+        assert_eq!(builtin_format(b"23"), CellFormat::Other);
         // Matching is on the raw attribute, so a padded id is not a date.
-        assert!(!builtin_is_date(b"014"));
+        assert_eq!(builtin_format(b"014"), CellFormat::Other);
+    }
+
+    #[test]
+    fn elapsed_time_formats_read_as_duration() {
+        assert_eq!(detect_format("[h]:mm:ss"), CellFormat::TimeDelta);
+        assert_eq!(detect_format("[ss]"), CellFormat::TimeDelta);
+        assert_eq!(detect_format("h:mm:ss"), CellFormat::DateTime);
+        assert_eq!(detect_format("m/d/yy"), CellFormat::DateTime);
+        assert_eq!(detect_format("0.00"), CellFormat::Other);
     }
 
     #[test]

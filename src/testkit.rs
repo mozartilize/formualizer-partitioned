@@ -8,8 +8,10 @@
 
 use std::io::{Cursor, Write};
 
-/// Built-in date format 14 is style index 1 (`cell_date`). Index 0 is general.
-const STYLES_XML: &[u8] = br#"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font/></fonts><fills count="1"><fill/></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="14" applyNumberFormat="1"/></cellXfs></styleSheet>"#;
+/// Built-in date format 14 is style index 1 (`cell_date`), time format 21 is
+/// index 2 (`cell_time`), elapsed-time format 46 is index 3 (`cell_duration`).
+/// Index 0 is general.
+const STYLES_XML: &[u8] = br#"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font/></fonts><fills count="1"><fill/></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0"/></cellStyleXfs><cellXfs count="4"><xf numFmtId="0"/><xf numFmtId="14" applyNumberFormat="1"/><xf numFmtId="21" applyNumberFormat="1"/><xf numFmtId="46" applyNumberFormat="1"/></cellXfs></styleSheet>"#;
 
 fn attach_styles(types: &mut String, rels: &mut String, rid: usize) {
     types.push_str(
@@ -185,6 +187,16 @@ pub fn cell_v(addr: &str, value: &str) -> String {
 /// A numeric cell using built-in date format 14 (style index 1).
 pub fn cell_date(addr: &str, serial: &str) -> String {
     format!(r#"<c r="{addr}" s="1"><v>{serial}</v></c>"#)
+}
+
+/// A numeric cell using built-in time format 21 (style index 2).
+pub fn cell_time(addr: &str, serial: &str) -> String {
+    format!(r#"<c r="{addr}" s="2"><v>{serial}</v></c>"#)
+}
+
+/// A numeric cell using built-in elapsed-time format 46 (style index 3).
+pub fn cell_duration(addr: &str, serial: &str) -> String {
+    format!(r#"<c r="{addr}" s="3"><v>{serial}</v></c>"#)
 }
 
 /// A cell that holds a shared string index.

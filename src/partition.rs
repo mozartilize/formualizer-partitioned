@@ -1976,7 +1976,7 @@ mod tests {
     use formualizer::workbook::backends::CalamineAdapter;
     use formualizer::workbook::traits::SpreadsheetReader;
     use formualizer::workbook::LoadStrategy;
-    use crate::testkit::{cell_date, cell_f, cell_s, cell_v, xlsx, xlsx_with_defined_names, xlsx_with_shared_strings};
+    use crate::testkit::{cell_date, cell_duration, cell_f, cell_s, cell_time, cell_v, xlsx, xlsx_with_defined_names, xlsx_with_shared_strings};
 
     fn shifted(formula: &str, dr: i64, dc: i64) -> String {
         canonical_formula(&shift_ast(&parse(formula).unwrap(), dr, dc))
@@ -2296,6 +2296,46 @@ mod tests {
         let plan = plan_scratch(&topo, 500, DEFAULT_LOOKUP_BUDGET).expect("scratch plan");
         let stored = run_scratch(&store, &topo, &plan).expect("scratch");
         assert_eq!(stored.values, vec![LiteralValue::Number(60.0)]);
+    }
+
+    /// A time-only serial reads as `Time`, an elapsed-time format as
+    /// `Duration`, and a date serial as `Date`. The store must not collapse
+    /// `Time` into `DateTime(1899-12-31T..)`, which is what the whole-file
+    /// loader's dense ingest does (its sparse path stamps `FormatId::TIME`,
+    /// the benchmark's read shape for large sheets).
+    #[test]
+    fn time_and_duration_cells_decode_to_their_own_types() {
+        let data_sheet = format!(
+            "{}{}{}",
+            cell_time("A1", "0.5"),
+            cell_duration("B1", "1.5"),
+            cell_date("C1", "43831"),
+        );
+        let main = format!(
+            "{}{}{}",
+            cell_f("B1", "Data!A1"),
+            cell_f("B2", "Data!B1"),
+            cell_f("B3", "Data!C1"),
+        );
+        let data = xlsx(&[("S", &main), ("Data", &data_sheet)]);
+
+        let mut topo = topo_of(&data);
+        let store = DataStore::load(&mut topo);
+        assert!(matches!(store.get(1, 1, 1), Some(LiteralValue::Time(_))), "{:?}", store.get(1, 1, 1));
+        assert!(matches!(store.get(1, 1, 2), Some(LiteralValue::Duration(_))), "{:?}", store.get(1, 1, 2));
+        assert!(matches!(store.get(1, 1, 3), Some(LiteralValue::Date(_))), "{:?}", store.get(1, 1, 3));
+
+        let expected = vec![
+            store.get(1, 1, 1).unwrap(),
+            store.get(1, 1, 2).unwrap(),
+            store.get(1, 1, 3).unwrap(),
+        ];
+        let got = run(&store, &topo, DEFAULT_BUDGET_CELLS).expect("components");
+        assert_eq!(got.values, expected);
+        if let Ok(plan) = plan_scratch(&topo, 500, DEFAULT_LOOKUP_BUDGET) {
+            let stored = run_scratch(&store, &topo, &plan).expect("scratch");
+            assert_eq!(stored.values, expected);
+        }
     }
 
     /// Overlay writes drop date formats, so `Date+1` became a serial Number.
