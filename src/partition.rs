@@ -602,6 +602,18 @@ pub fn run(
 /// Build one batch workbook: the sheets and copied inputs the batch reads,
 /// its workbook-scoped names, its formulas, and — when `seed` is set — the
 /// occupancy the whole file has.
+/// Iterative workbooks must use the same cycle policy as the whole-file loader.
+fn mini_workbook(topo: &Topology) -> Workbook {
+    let mut config = crate::clock::pin(WorkbookConfig::ephemeral());
+    if let Some(settings) = &topo.calc_settings {
+        config.eval.cycle = formualizer::workbook::calc_pr::apply_calc_settings_to_cycle(
+            settings,
+            config.eval.cycle,
+        );
+    }
+    Workbook::new_with_config(config)
+}
+
 fn build_batch_workbook(
     store: &DataStore,
     topo: &Topology,
@@ -610,7 +622,7 @@ fn build_batch_workbook(
     ranges: &[RangeRef],
     seed_extents: &[RangeAddress],
 ) -> Result<Workbook, String> {
-    let mut wb = Workbook::new_with_config(crate::clock::pin(WorkbookConfig::ephemeral()));
+    let mut wb = mini_workbook(topo);
     let mut added: HashSet<u16> = HashSet::new();
     for &i in cells {
         let s = topo.cells[i as usize].sheet;
@@ -1333,6 +1345,13 @@ pub fn plan_scratch(
         columns.push(ColumnPlan { col: *col, ast, anchor_row, dc });
     }
     let (first_row, last_row) = band.ok_or("no formulas")?;
+    // Reusing a scratch sheet seeds iterative cycles from the previous chunk's
+    // results, changing convergence. Components get fresh workbooks instead.
+    if topo.calc_settings.as_ref().is_some_and(|settings| settings.iterate)
+        && chunk_rows.max(1) < last_row - first_row + 1
+    {
+        return Err("iterative calculation needs fresh components across chunks");
+    }
     debug_assert_eq!(rows_of_first.len(), (last_row - first_row + 1) as usize);
     // A stable order keeps the scratch sheet layout the same between runs.
     columns.sort_by_key(|c| c.col);
@@ -1465,7 +1484,7 @@ fn scratch_workbook(
     plan: &ScratchPlan,
 ) -> Result<Workbook, String> {
     let name = topo.sheets[plan.sheet as usize].name.clone();
-    let mut wb = Workbook::new_with_config(crate::clock::pin(WorkbookConfig::ephemeral()));
+    let mut wb = mini_workbook(topo);
     wb.add_sheet(&name).map_err(|e| e.to_string())?;
 
     // Static inputs live on other sheets and never change, so they are copied
@@ -2037,6 +2056,7 @@ mod tests {
 
     fn fake_topo(extents: &[u64]) -> Topology {
         Topology {
+            calc_settings: None,
             sheets: Vec::new(),
             name_only_sheets: Vec::new(),
             cells: Vec::new(),
@@ -2731,6 +2751,76 @@ mod tests {
             ),
         ));
         assert!(t.name_only_sheets.is_empty(), "{:?}", t.name_only_sheets);
+    }
+
+    #[test]
+    fn iterative_calculation_settings_match_whole_file() {
+        let sheet = format!("{}{}", cell_f("A1", "(B1+1)/2"), cell_f("B1", "A1"));
+        for calc in [
+            "",
+            r#"<calcPr iterate="0" iterateCount="100" iterateDelta="0.001"/>"#,
+            r#"<calcPr iterate="1"/>"#,
+            r#"<calcPr iterate="1" iterateCount="100" iterateDelta="0.01"/>"#,
+            r#"<calcPr iterate="true" iterateCount="2" iterateDelta="0"/>"#,
+        ] {
+            let data = crate::testkit::xlsx_with_calc_pr(&[("S", &sheet)], calc);
+            let mut topo = topo_of(&data);
+            assert!(topo.is_partitionable());
+            let store = DataStore::load(&mut topo);
+            let adapter = <CalamineAdapter as SpreadsheetReader>::open_bytes(data.clone()).unwrap();
+            let mut whole = Workbook::from_reader(
+                adapter, LoadStrategy::EagerAll, WorkbookConfig::ephemeral(),
+            ).unwrap();
+            whole.evaluate_all().unwrap();
+            let expected: Vec<_> = topo.cells.iter().map(|c| whole.get_value("S", c.row, c.col).unwrap()).collect();
+            for budget in [1, DEFAULT_BUDGET_CELLS] {
+                assert_eq!(run(&store, &topo, budget).unwrap().values, expected, "components {calc}");
+            }
+            let plan = plan_scratch(&topo, 500, DEFAULT_LOOKUP_BUDGET).unwrap();
+            assert_eq!(run_scratch(&store, &topo, &plan).unwrap().values, expected, "scratch {calc}");
+            let mut stream = ScratchRun::open(&data, &mut topo, plan).unwrap();
+            let row = stream.row(1).unwrap();
+            for (i, c) in topo.cells.iter().enumerate() {
+                assert_eq!(cell_of(row, c.col), expected[i], "stream {calc}");
+            }
+        }
+    }
+
+    #[test]
+    fn iterative_cycles_use_components_when_multiple_chunks_are_needed() {
+        let mut sheet = String::new();
+        for r in 1..=4 {
+            sheet.push_str(&format!(r#"<row r="{r}">{}{}{}</row>"#,
+                cell_v(&format!("A{r}"), &(r * 3).to_string()),
+                cell_f(&format!("B{r}"), &format!("(C{r}+A{r})/2")),
+                cell_f(&format!("C{r}"), &format!("B{r}"))));
+        }
+        let data = crate::testkit::xlsx_with_calc_pr(&[("S", &sheet)],
+            r#"<calcPr iterate="1" iterateCount="100" iterateDelta="0.001"/>"#);
+        let mut topo = topo_of(&data);
+        let store = DataStore::load(&mut topo);
+        let adapter = <CalamineAdapter as SpreadsheetReader>::open_bytes(data.clone()).unwrap();
+        let mut whole = Workbook::from_reader(adapter, LoadStrategy::EagerAll, WorkbookConfig::ephemeral()).unwrap();
+        whole.evaluate_all().unwrap();
+        let expected: Vec<_> = topo.cells.iter().map(|c| whole.get_value("S", c.row, c.col).unwrap()).collect();
+        for budget in [1, DEFAULT_BUDGET_CELLS] {
+            assert_eq!(run(&store, &topo, budget).unwrap().values, expected);
+        }
+        for chunk in [1, 2] {
+            assert_eq!(plan_scratch(&topo, chunk, DEFAULT_LOOKUP_BUDGET).err(),
+                Some("iterative calculation needs fresh components across chunks"));
+        }
+        for chunk in [4, 500] {
+            let plan = plan_scratch(&topo, chunk, DEFAULT_LOOKUP_BUDGET).unwrap();
+            assert_eq!(run_scratch(&store, &topo, &plan).unwrap().values, expected, "chunk {chunk}");
+            let mut stream = ScratchRun::open(&data, &mut topo, plan).unwrap();
+            for r in 1..=4 {
+                let row = stream.row(r).unwrap();
+                for (i, c) in topo.cells.iter().enumerate().filter(|(_, c)| c.row == r) {
+                    assert_eq!(cell_of(row, c.col), expected[i], "stream chunk {chunk} row {r}");
+                }
+            }
+        }
     }
 
     /// A declared cell with no value counts in `COUNTBLANK`, so the store

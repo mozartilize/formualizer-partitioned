@@ -7,7 +7,11 @@ that keep a piece equal to Formualizer whole-file.
 
 ## Mini-workbooks
 
-Batch and chunk workbooks are `Workbook::new_with_config(ephemeral())`.
+Batch and chunk workbooks start with `WorkbookConfig::ephemeral()` and the
+run's pinned clock. Before construction, apply the source workbook's `<calcPr>`
+settings with Formualizer's `apply_calc_settings_to_cycle`. Iteration requires
+both runtime cycle detection and the source iteration count/tolerance; default
+cycle handling returns `Circ` instead of iterating.
 
 Do not copy the xlsx loader's ingest-only settings (`SheetIndexMode::Lazy`,
 `range_expansion_limit = 0`, `defer_graph_building`). Those are restored
@@ -40,6 +44,10 @@ a serial `Number`, and `TEXT(...,"DD")` then prints the serial.
 
 A scratch sheet taller than the formula block places empty-tail formulas that
 still evaluate (COUNTIF over dummy rows, and so on).
+
+Iterative workbooks cannot reuse a scratch workbook across chunks: previous
+formula results seed the next cycle and change convergence. If more than one
+chunk is needed, use components instead. A single scratch chunk is allowed.
 
 ## Writes
 

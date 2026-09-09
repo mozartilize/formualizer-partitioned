@@ -103,6 +103,15 @@ pub fn xlsx_with_shared_strings(sheets: &[(&str, &str)], strings: &[&str]) -> Ve
 
 /// Build a workbook and put the supplied entries inside `<definedNames>`.
 pub fn xlsx_with_defined_names(sheets: &[(&str, &str)], defined_names: &str) -> Vec<u8> {
+    xlsx_with_settings(sheets, defined_names, "")
+}
+
+/// Build a workbook with a supplied `<calcPr>` element.
+pub fn xlsx_with_calc_pr(sheets: &[(&str, &str)], calc_pr: &str) -> Vec<u8> {
+    xlsx_with_settings(sheets, "", calc_pr)
+}
+
+fn xlsx_with_settings(sheets: &[(&str, &str)], defined_names: &str, calc_pr: &str) -> Vec<u8> {
     let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let opts =
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
@@ -132,6 +141,7 @@ pub fn xlsx_with_defined_names(sheets: &[(&str, &str)], defined_names: &str) -> 
         wb.push_str(defined_names);
         wb.push_str("</definedNames>");
     }
+    wb.push_str(calc_pr);
     wb.push_str("</workbook>");
     rels.push_str("</Relationships>");
 

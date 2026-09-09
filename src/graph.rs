@@ -193,6 +193,8 @@ pub struct ParseFailure {
 /// The prelude stage runs between the two stages and can replace a formula's
 /// text. The references are therefore collected in the graph stage, not here.
 pub struct Sources {
+    /// Workbook calculation settings, applied before mini-workbook construction.
+    pub calc_settings: Option<formualizer::workbook::traits::CalcSettings>,
     pub sheets: Vec<SheetInfo>,
     pub cells: Vec<FormulaCell>,
     /// Distinct formula sources, indexed by `FormulaCell::ast`.
@@ -256,6 +258,8 @@ pub struct Sources {
 /// The dependency structure of a workbook: which cells hold formulas, the
 /// deduplicated ASTs behind them, and how they group into components.
 pub struct Topology {
+    /// Preserve the whole-file loader's cycle policy in every evaluation layout.
+    pub calc_settings: Option<formualizer::workbook::traits::CalcSettings>,
     pub sheets: Vec<SheetInfo>,
     pub cells: Vec<FormulaCell>,
     /// Distinct formula sources, indexed by `FormulaCell::ast`. A batch parses
@@ -856,6 +860,7 @@ pub fn read(data: &[u8]) -> Sources {
         Ok(z) => z,
         Err(_) => {
             return Sources {
+                calc_settings: None,
                 sheets,
                 cells,
                 texts,
@@ -877,6 +882,11 @@ pub fn read(data: &[u8]) -> Sources {
             }
         }
     };
+    let calc_settings = zip.by_name("xl/workbook.xml").ok().and_then(|mut part| {
+        let mut xml = Vec::new();
+        part.read_to_end(&mut xml).ok()?;
+        formualizer::workbook::calc_pr::parse_calc_pr(&xml)
+    });
     let parts = sheet_parts(&mut zip);
     let defined_names = read_defined_names(&mut zip, &parts);
     let mut name_only_sheets: Vec<String> = Vec::new();
@@ -1246,6 +1256,7 @@ pub fn read(data: &[u8]) -> Sources {
     }
 
     Sources {
+        calc_settings,
         sheets,
         cells,
         texts,
@@ -1760,6 +1771,7 @@ pub fn build(data: &[u8]) -> Topology {
 /// prelude stage can replace a formula's text between the two stages.
 pub fn build_from(src: Sources) -> Topology {
     let Sources {
+        calc_settings,
         sheets,
         cells,
         texts,
@@ -2117,6 +2129,7 @@ pub fn build_from(src: Sources) -> Topology {
         .collect();
 
     Topology {
+        calc_settings,
         sheets,
         cells,
         texts,
