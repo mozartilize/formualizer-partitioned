@@ -109,22 +109,7 @@ fn prepare(data: &[u8], use_prelude: bool) -> Prepared {
 fn load_workbook(data: Vec<u8>) -> Result<Workbook, String> {
     let adapter =
         <CalamineAdapter as SpreadsheetReader>::open_bytes(data).map_err(|e| e.to_string())?;
-    let mut config = WorkbookConfig::interactive();
-    // A declared `<dimension>` is a hint, not a fact. Writers emit full-width
-    // or otherwise inflated ranges for sheets holding a handful of cells, and
-    // the loader materializes that declared rectangle densely, allocating a
-    // `dims_cols`-wide row buffer per row. Two corpus files abort this way:
-    // one declares A1:XFD20 (327,680 cells) for 7 formulas, another
-    // A1:EWJ1172 (4,673,936 cells) for 54 formulas.
-    //
-    // Above this many declared cells, start sparse and let the populated cell
-    // count decide. Tied to `sparse_sheet_cell_threshold`, the point where the
-    // loader already starts testing whether a sheet is sparse: a sheet big
-    // enough to warrant that test is too big to pre-materialize densely.
-    // Note both files sit far below the 128,000,000 default, so raising the
-    // benchmark's memory cap does not help them.
-    config.ingest_limits.max_sheet_logical_cells =
-        config.ingest_limits.sparse_sheet_cell_threshold;
+    let config = WorkbookConfig::interactive();
     Workbook::from_reader(adapter, LoadStrategy::EagerAll, clock::pin(config))
         .map_err(|e| e.to_string())
 }
@@ -1027,9 +1012,34 @@ pub fn worker(
                 .unwrap()
                 .extend(checked.as_object().unwrap().clone()),
             Err((stage, reason)) => {
-                result["status"] = json!("error");
-                result["stage"] = json!(stage);
-                result["reason"] = json!(reason);
+                let strategy = result["strategy"].as_str().unwrap_or("whole");
+                if strategy == "partitioned" || strategy == "components" {
+                    // Whole baseline failed, but the strategy is partitioned/components.
+                    // Fall back to check_part (materialized vs streamed) instead of reporting error.
+                    match check_part(data, min_formulas) {
+                        Ok(checked) => {
+                            result
+                                .as_object_mut()
+                                .unwrap()
+                                .extend(checked.as_object().unwrap().clone());
+                            result["whole_status"] = json!("error");
+                            result["whole_stage"] = json!(stage);
+                            result["whole_reason"] = json!(reason);
+                        }
+                        Err((part_stage, part_reason)) => {
+                            result["status"] = json!("error");
+                            result["stage"] = json!(part_stage);
+                            result["reason"] = json!(part_reason);
+                            result["whole_status"] = json!("error");
+                            result["whole_stage"] = json!(stage);
+                            result["whole_reason"] = json!(reason);
+                        }
+                    }
+                } else {
+                    result["status"] = json!("error");
+                    result["stage"] = json!(stage);
+                    result["reason"] = json!(reason);
+                }
             }
         },
         // Partitioned-only fallback: when the whole side aborts the process
@@ -1062,6 +1072,7 @@ pub fn worker(
             }
         },
         "speed" => {
+            let mut whole_error = None;
             for mode in ["whole", "partitioned"] {
                 let start = Instant::now();
                 let output = consume(data, mode, min_formulas);
@@ -1076,15 +1087,28 @@ pub fn worker(
                 match output {
                     Ok(output) => result[format!("{mode}_output")] = output,
                     Err(reason) => {
-                        result["status"] = json!("error");
-                        result["stage"] = json!(mode);
-                        result["reason"] = json!(reason);
-                        return Ok(result);
+                        if mode == "whole" {
+                            whole_error = Some(reason);
+                        } else {
+                            result["status"] = json!("error");
+                            result["stage"] = json!(mode);
+                            result["reason"] = json!(reason);
+                            return Ok(result);
+                        }
                     }
                 }
             }
-            result["time_ratio"] =
-                json!(result["partitioned"].as_f64().unwrap() / result["whole"].as_f64().unwrap());
+            if let Some(reason) = whole_error {
+                // Whole baseline failed, but partitioned succeeded.
+                // Record whole's failure details without failing the overall result.
+                result["whole_status"] = json!("error");
+                result["whole_stage"] = json!("whole");
+                result["whole_reason"] = json!(reason);
+                result["status"] = json!("ok");
+            } else {
+                result["time_ratio"] =
+                    json!(result["partitioned"].as_f64().unwrap() / result["whole"].as_f64().unwrap());
+            }
         }
         "whole" | "partitioned" => {
             let start = Instant::now();

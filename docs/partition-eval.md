@@ -29,7 +29,8 @@ Per sheet, after gathering unique stored cells:
 | sheet shape | path |
 |---|---|
 | packed A1-origin rectangle (`n == max_row * max_col`) | `begin_bulk_ingest_arrow` + `append_row` |
-| anything looser | empty Arrow sheet + `begin_bulk_update_arrow` on present cells |
+| sparse sheet (max col <= 1024) | empty Arrow sheet + `begin_bulk_update_arrow` on present cells |
+| very wide sparse sheet (max col > 1024) | `set_value` under deferred-dirty (avoids pre-allocating Arrow column builders for thousands of empty columns) |
 | Date / DateTime / Time / Duration | `set_value` (overlay does not stamp those formats) |
 
 Do not fill holes with `Empty`. Missing and Empty both count as blank for

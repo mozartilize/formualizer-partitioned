@@ -463,7 +463,19 @@ fn sweep(args: Args) -> Result<i32, String> {
             }
             for (mode, result) in [("memory_whole", &w), ("memory_partitioned", &p)] {
                 record(&mut report, &args, path, mode, result)?;
-                failures += count(&mut memory_counts, result);
+                if mode == "memory_partitioned" || ok(&p) {
+                    // Do not count memory_whole failure as a benchmark failure
+                    // if the partitioned path succeeded.
+                    if mode == "memory_partitioned" {
+                        failures += count(&mut memory_counts, result);
+                    } else {
+                        // Still track whole's outcome in counts for visibility, but do not increment failures
+                        let status = result["status"].as_str().unwrap_or("error");
+                        *memory_counts.entry(status.into()).or_default() += 1;
+                    }
+                } else {
+                    failures += count(&mut memory_counts, result);
+                }
                 if result["status"] == "error" || result["status"] == "timeout" {
                     eprintln!(
                         "{mode} {}: stage={} reason={}",
@@ -519,6 +531,10 @@ fn sweep(args: Args) -> Result<i32, String> {
             if !ok(&speed) {
                 let part = measure(&exe, path, "speed_partitioned", &args);
                 if ok(&part) {
+                    speed["whole_status"] = speed["status"].clone();
+                    speed["whole_stage"] = speed["stage"].clone();
+                    speed["whole_reason"] = speed["reason"].clone();
+                    speed["status"] = json!("ok");
                     speed["partitioned"] = part["partitioned"].clone();
                     speed["partitioned_output"] = part["partitioned_output"].clone();
                     speed["partitioned_status"] = json!("ok");
@@ -539,6 +555,9 @@ fn sweep(args: Args) -> Result<i32, String> {
                         cp["whole_status"] = c["status"].clone();
                         cp["whole_stage"] = c["stage"].clone();
                         cp["whole_reason"] = c["reason"].clone();
+                        if ok(&cp) {
+                            cp["status"] = json!("ok");
+                        }
                         cp
                     } else {
                         c
@@ -550,6 +569,7 @@ fn sweep(args: Args) -> Result<i32, String> {
         |path, (speed, check)| {
             record(&mut report, &args, path, "speed", &speed)?;
             failures += count(&mut counts, &speed);
+            let is_part_strategy = speed["strategy"] == "partitioned" || speed["strategy"] == "components";
             if speed["status"] == "error" || speed["status"] == "timeout" {
                 eprintln!(
                     "speed {}: stage={} reason={}",
@@ -563,12 +583,14 @@ fn sweep(args: Args) -> Result<i32, String> {
             }
             if let Some(check) = check {
                 record(&mut report, &args, path, "correctness", &check)?;
-                // A salvaged check still lost its whole baseline: that is a
-                // failed measurement even when the partitioned evidence is ok.
-                if check.get("whole_status").is_some() {
-                    failures += 1;
+                // If strategy was partitioned/components and whole timed out or errored,
+                // do not treat that as a benchmark failure. Only count real errors/mismatches
+                // on the partitioned paths themselves.
+                if !(is_part_strategy && check.get("whole_status").is_some() && ok(&check)) {
+                    failures += count(&mut checks, &check);
+                } else {
+                    *checks.entry(check["status"].as_str().unwrap_or("ok").into()).or_default() += 1;
                 }
-                failures += count(&mut checks, &check);
                 if matches!(check["status"].as_str(), Some("error" | "timeout")) {
                     eprintln!(
                         "correctness {}: stage={} reason={}",

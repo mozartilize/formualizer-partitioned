@@ -1080,9 +1080,31 @@ fn copy_inputs(
     }
 
     if !sparse.is_empty() {
-        {
+        // Wide sheets (e.g. col XFD / 16384) would blow memory if passed to
+        // `ab.add_sheet`, which pre-allocates Arrow column builders for every
+        // column up to `max_col`. Split sparse sheets: moderate widths use the
+        // empty-Arrow-sheet + bulk update overlay path; very wide sheets write
+        // directly via `wb.set_value` under deferred-dirty.
+        const MAX_ARROW_SPARSE_COLS: usize = 1024;
+        let mut arrow_sparse: Vec<u16> = Vec::new();
+        let mut wide_sparse: Vec<u16> = Vec::new();
+        for &s in &sparse {
+            let max_col = by_sheet[&s]
+                .values()
+                .flatten()
+                .map(|&(c, _)| c)
+                .max()
+                .unwrap_or(1) as usize;
+            if max_col <= MAX_ARROW_SPARSE_COLS {
+                arrow_sparse.push(s);
+            } else {
+                wide_sparse.push(s);
+            }
+        }
+
+        if !arrow_sparse.is_empty() {
             let mut ab = wb.engine_mut().begin_bulk_ingest_arrow();
-            for &s in &sparse {
+            for &s in &arrow_sparse {
                 let name = &topo.sheets[s as usize].name;
                 let max_col = by_sheet[&s]
                     .values()
@@ -1093,40 +1115,70 @@ fn copy_inputs(
                 ab.add_sheet(name, max_col.max(1), 32 * 1024);
             }
             ab.finish().map_err(|e| e.to_string())?;
-        }
-        // Overlay does not stamp DATE/DATETIME formats. `set_value` does, and
-        // that is what makes `C2+1` a Date rather than a serial Number.
-        let mut temporal: Vec<(u16, u32, u32, LiteralValue)> = Vec::new();
-        let mut ub = wb.engine_mut().begin_bulk_update_arrow();
-        for s in sparse {
-            let name = topo.sheets[s as usize].name.clone();
-            let Some(rows) = by_sheet.remove(&s) else {
-                continue;
-            };
-            for (r, cols) in rows {
-                for (c, v) in cols {
-                    if matches!(
-                        v,
-                        LiteralValue::Date(_)
-                            | LiteralValue::DateTime(_)
-                            | LiteralValue::Time(_)
-                            | LiteralValue::Duration(_)
-                    ) {
-                        temporal.push((s, r, c, v));
-                    } else {
-                        ub.update_cell(&name, r, c, v);
+
+            // Overlay does not stamp DATE/DATETIME formats. `set_value` does, and
+            // that is what makes `C2+1` a Date rather than a serial Number.
+            let mut temporal: Vec<(u16, u32, u32, LiteralValue)> = Vec::new();
+            let mut ub = wb.engine_mut().begin_bulk_update_arrow();
+            for s in arrow_sparse {
+                let name = topo.sheets[s as usize].name.clone();
+                let Some(rows) = by_sheet.remove(&s) else {
+                    continue;
+                };
+                for (r, cols) in rows {
+                    for (c, v) in cols {
+                        if matches!(
+                            v,
+                            LiteralValue::Date(_)
+                                | LiteralValue::DateTime(_)
+                                | LiteralValue::Time(_)
+                                | LiteralValue::Duration(_)
+                        ) {
+                            temporal.push((s, r, c, v));
+                        } else {
+                            ub.update_cell(&name, r, c, v);
+                        }
                     }
                 }
             }
+            ub.finish().map_err(|e| e.to_string())?;
+            if !temporal.is_empty() {
+                wb.engine_mut().begin_deferred_dirty();
+                let mut failed = None;
+                for (s, r, c, v) in temporal {
+                    let name = &topo.sheets[s as usize].name;
+                    if let Err(e) = wb.set_value(name, r, c, v) {
+                        failed = Some(e.to_string());
+                        break;
+                    }
+                }
+                wb.engine_mut().end_deferred_dirty();
+                if let Some(e) = failed {
+                    return Err(e);
+                }
+            }
         }
-        ub.finish().map_err(|e| e.to_string())?;
-        if !temporal.is_empty() {
+
+        if !wide_sparse.is_empty() {
             wb.engine_mut().begin_deferred_dirty();
             let mut failed = None;
-            for (s, r, c, v) in temporal {
+            for s in wide_sparse {
                 let name = &topo.sheets[s as usize].name;
-                if let Err(e) = wb.set_value(name, r, c, v) {
-                    failed = Some(e.to_string());
+                let Some(rows) = by_sheet.remove(&s) else {
+                    continue;
+                };
+                for (r, cols) in rows {
+                    for (c, v) in cols {
+                        if let Err(e) = wb.set_value(name, r, c, v) {
+                            failed = Some(e.to_string());
+                            break;
+                        }
+                    }
+                    if failed.is_some() {
+                        break;
+                    }
+                }
+                if failed.is_some() {
                     break;
                 }
             }
@@ -2233,6 +2285,59 @@ mod tests {
         if let Ok(plan) = plan_scratch(&topo, 500, DEFAULT_LOOKUP_BUDGET) {
             let stored = run_scratch(&store, &topo, &plan).expect("scratch");
             assert_eq!(stored.values, vec![LiteralValue::Number(30.0)]);
+        }
+    }
+
+    /// Wide sheets (col > 1024) use `wb.set_value` instead of `ab.add_sheet`,
+    /// avoiding giant Arrow column builder pre-allocations.
+    #[test]
+    fn wide_sparse_inputs_match_whole_file() {
+        let data_sheet = format!(
+            "{}{}{}",
+            cell_v("A1", "10"),
+            cell_v("A3", "20"),
+            cell_v("XFD1", "50"), // col 16384
+        );
+        let main = format!(
+            "{}{}{}",
+            cell_f("B1", "SUM(Data!A1:A3)"),
+            cell_f("B2", "COUNTBLANK(Data!A1:A3)"),
+            cell_f("B3", "Data!XFD1+5"),
+        );
+        let data = xlsx(&[("S", &main), ("Data", &data_sheet)]);
+        assert_eq!(
+            whole_value(&data, "S", 1, 2),
+            Some(LiteralValue::Number(30.0))
+        );
+        assert_eq!(
+            whole_value(&data, "S", 2, 2),
+            Some(LiteralValue::Number(1.0))
+        );
+        assert_eq!(
+            whole_value(&data, "S", 3, 2),
+            Some(LiteralValue::Number(55.0))
+        );
+        let mut topo = topo_of(&data);
+        let store = DataStore::load(&mut topo);
+        let got = run(&store, &topo, DEFAULT_BUDGET_CELLS).expect("components");
+        assert_eq!(
+            got.values,
+            vec![
+                LiteralValue::Number(30.0),
+                LiteralValue::Number(1.0),
+                LiteralValue::Number(55.0),
+            ]
+        );
+        if let Ok(plan) = plan_scratch(&topo, 500, DEFAULT_LOOKUP_BUDGET) {
+            let stored = run_scratch(&store, &topo, &plan).expect("scratch");
+            assert_eq!(
+                stored.values,
+                vec![
+                    LiteralValue::Number(30.0),
+                    LiteralValue::Number(1.0),
+                    LiteralValue::Number(55.0),
+                ]
+            );
         }
     }
 
