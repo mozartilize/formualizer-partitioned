@@ -172,6 +172,10 @@ impl SheetData {
     fn len(&self) -> usize {
         self.vals.len()
     }
+
+    fn is_empty(&self) -> bool {
+        self.vals.is_empty()
+    }
 }
 
 /// Valueless declared cells of one sheet that a formula range covers.
@@ -248,6 +252,10 @@ impl DataStore {
 
     pub fn len(&self) -> usize {
         self.sheets.iter().map(|s| s.len()).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sheets.iter().all(|s| s.is_empty())
     }
 
     /// Take the values the read stage collected and index them.
@@ -687,9 +695,9 @@ fn place_formulas_batch(
             // component is alive at a time.
             for &i in comp {
                 let fc = &topo.cells[i as usize];
-                if !parsed.contains_key(&fc.ast) {
+                if let std::collections::hash_map::Entry::Vacant(e) = parsed.entry(fc.ast) {
                     let ast = parse(&topo.texts[fc.ast as usize]).map_err(|e| e.to_string())?;
-                    parsed.insert(fc.ast, ast);
+                    e.insert(ast);
                 }
                 let ast = shift_ast(&parsed[&fc.ast], fc.dr, fc.dc);
                 wb.engine_mut()
@@ -705,9 +713,9 @@ fn place_formulas_batch(
         }
         for &i in comp {
             let fc = &topo.cells[i as usize];
-            if !parsed.contains_key(&fc.ast) {
+            if let std::collections::hash_map::Entry::Vacant(e) = parsed.entry(fc.ast) {
                 let ast = parse(&topo.texts[fc.ast as usize]).map_err(|e| e.to_string())?;
-                parsed.insert(fc.ast, ast);
+                e.insert(ast);
             }
             let ast = shift_ast(&parsed[&fc.ast], fc.dr, fc.dc);
             unit.push((fc.sheet, fc.row, fc.col, ast));
@@ -1261,7 +1269,7 @@ pub struct ScratchPlan {
 impl ScratchPlan {
     pub fn n_chunks(&self) -> usize {
         let rows = (self.last_row - self.first_row + 1) as u64;
-        ((rows + self.chunk_rows as u64 - 1) / self.chunk_rows as u64) as usize
+        rows.div_ceil(self.chunk_rows as u64) as usize
     }
 
     pub fn n_data_cols(&self) -> usize {
@@ -1562,9 +1570,9 @@ fn scratch_workbook(
     let mut parsed: HashMap<u32, ASTNode> = HashMap::new();
     let mut staged: Vec<(u16, u32, u32, ASTNode)> = Vec::new();
     for plan_col in &plan.columns {
-        if !parsed.contains_key(&plan_col.ast) {
+        if let std::collections::hash_map::Entry::Vacant(e) = parsed.entry(plan_col.ast) {
             let ast = parse(&topo.texts[plan_col.ast as usize]).map_err(|e| e.to_string())?;
-            parsed.insert(plan_col.ast, ast);
+            e.insert(ast);
         }
         let template = &parsed[&plan_col.ast];
         for t in 1..=plan.chunk_rows {
@@ -3070,7 +3078,7 @@ mod tests {
                     cell_v("A1", "10"),
                     cell_v("A2", "20"),
                     cell_v("A3", "30"),
-                    format!(r#"<c r="B2"><f t="array" ref="{extent}">INDEX(A1:A3,0)</f><v>999</v></c>"#),
+                    format_args!(r#"<c r="B2"><f t="array" ref="{extent}">INDEX(A1:A3,0)</f><v>999</v></c>"#),
                     if blocked { cell_v("B3", "999") } else { String::new() },
                 );
                 let data = xlsx(&[("S", &sheet)]);

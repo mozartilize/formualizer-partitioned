@@ -1391,7 +1391,7 @@ mod tests {
             LiteralValue::Error(ExcelError::new(ExcelErrorKind::Na)),
         ] {
             let text = render_literal(&v).expect("value must render");
-            let back = parse(&format!("={text}")).expect("rendered text must parse");
+            let back = parse(format!("={text}")).expect("rendered text must parse");
             assert!(
                 literal_reads_back(&v, &back),
                 "{v:?} rendered as {text} did not read back"

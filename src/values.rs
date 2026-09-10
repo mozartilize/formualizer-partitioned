@@ -87,6 +87,7 @@ fn detect_format(format: &str) -> CellFormat {
 }
 
 /// Backwards view used by callers that only care about date-vs-not.
+#[cfg(test)]
 fn is_date_format(format: &str) -> bool {
     detect_format(format) != CellFormat::Other
 }

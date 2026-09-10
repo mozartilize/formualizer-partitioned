@@ -1905,7 +1905,6 @@ pub fn build_from(src: Sources) -> Topology {
                     // `#REF!` in Excel; dropping the edge would read blank.
                     _ => {
                         unsupported_refs += 1;
-                        return;
                     }
                 }
             }
@@ -2071,10 +2070,10 @@ pub fn build_from(src: Sources) -> Topology {
     // fraction of that. Keep the map.
     let mut dense: HashMap<u32, u32> = HashMap::new();
     let mut comp_of = vec![0u32; n];
-    for i in 0..n {
+    for (i, comp) in comp_of.iter_mut().enumerate() {
         let root = dsu.find(i as u32);
         let next = dense.len() as u32;
-        comp_of[i] = *dense.entry(root).or_insert(next);
+        *comp = *dense.entry(root).or_insert(next);
     }
     let n_comp = dense.len();
 
@@ -2107,9 +2106,9 @@ pub fn build_from(src: Sources) -> Topology {
     // Collapsing duplicate ranges matters when thousands of formulas read the
     // same lookup table: it saves the copy step from reading that table once
     // per formula, and the batch budget charges it once (see `plan_batches`).
-    for c in 0..n_comp {
-        comp_refs[c].sort_unstable();
-        comp_refs[c].dedup();
+    for refs in &mut comp_refs {
+        refs.sort_unstable();
+        refs.dedup();
     }
 
     let full_extent_cells: u64 = sheets

@@ -395,6 +395,7 @@ fn set_parse_failure(out: &Bound<'_, PyDict>, failure: Option<&graph::ParseFailu
 /// Report how a workbook would be evaluated, without evaluating it.
 #[pyfunction]
 #[pyo3(signature = (data, budget_cells = None, max_ratio = DEFAULT_MAX_RATIO, min_formulas = DEFAULT_MIN_FORMULAS, prelude = true, lookup_budget = partition::DEFAULT_LOOKUP_BUDGET, now = None))]
+#[allow(clippy::too_many_arguments)]
 fn partition_plan(
     py: Python<'_>,
     data: Vec<u8>,
@@ -572,7 +573,7 @@ fn grow_extents(
 enum RowSource {
     /// Component-by-component results plus the data cells behind them.
     Partitioned {
-        topo: graph::Topology,
+        topo: Box<graph::Topology>,
         store: partition::DataStore,
         values: Vec<LiteralValue>,
         /// Cells a spilled array wrote that no formula reads; served in
@@ -583,12 +584,12 @@ enum RowSource {
     /// read from the file as the caller asks for them, so no run holds the
     /// whole sheet.
     Streamed {
-        run: partition::ScratchRun,
+        run: Box<partition::ScratchRun>,
         /// The sheet the run streams. Every other sheet comes from its store.
         sheet: u16,
     },
     /// Whole-file fallback: rows are read straight off the evaluated workbook.
-    Whole { wb: Workbook },
+    Whole { wb: Box<Workbook> },
 }
 
 /// Yields `(sheet, row_number, values)` one row at a time.
@@ -736,7 +737,7 @@ fn whole_row_iter(data: Vec<u8>, topo: &graph::Topology, trim: bool, verdict: &'
         })
         .collect();
     Ok(RowIter {
-        source: RowSource::Whole { wb },
+        source: RowSource::Whole { wb: Box::new(wb) },
         sheets,
         sheet: 0,
         row: 1,
@@ -748,6 +749,7 @@ fn whole_row_iter(data: Vec<u8>, topo: &graph::Topology, trim: bool, verdict: &'
 /// Evaluate a workbook and stream its rows, partitioning when that is safe.
 #[pyfunction]
 #[pyo3(signature = (data, budget_cells = None, max_ratio = DEFAULT_MAX_RATIO, min_formulas = DEFAULT_MIN_FORMULAS, trim = false, prelude = true, lookup_budget = partition::DEFAULT_LOOKUP_BUDGET, now = None))]
+#[allow(clippy::too_many_arguments)]
 fn eval_rows(
     data: Vec<u8>,
     budget_cells: Option<u64>,
@@ -766,6 +768,7 @@ fn eval_rows(
 /// Evaluate a workbook and stream its rows, partitioning when that is safe.
 ///
 /// Shared by the `eval_rows` pyfunction and `_benchmark_rows(mode="auto")`.
+#[allow(clippy::too_many_arguments)]
 fn eval_rows_impl(
     data: Vec<u8>,
     budget_cells: Option<u64>,
@@ -805,7 +808,7 @@ fn eval_rows_impl(
                 Ok(run) => {
                     let sheet = run.sheet();
                     let rows = RowIter {
-                        source: RowSource::Streamed { run, sheet },
+                        source: RowSource::Streamed { run: Box::new(run), sheet },
                         sheets,
                         sheet: 0,
                         row: 1,
@@ -827,7 +830,7 @@ fn eval_rows_impl(
                     grow_extents(&mut sheets, &evaluated.spilled);
                     let rows = RowIter {
                         source: RowSource::Partitioned {
-                            topo,
+                            topo: Box::new(topo),
                             store,
                             values: evaluated.values,
                             spilled: evaluated.spilled.into_iter().map(|(s, r, c, v)| ((s, r, c), v)).collect(),
@@ -850,7 +853,7 @@ fn eval_rows_impl(
             grow_extents(&mut sheets, &evaluated.spilled);
             let rows = RowIter {
                 source: RowSource::Partitioned {
-                    topo,
+                    topo: Box::new(topo),
                     store,
                     values: evaluated.values,
                     spilled: evaluated.spilled.into_iter().map(|(s, r, c, v)| ((s, r, c), v)).collect(),
@@ -869,6 +872,7 @@ fn eval_rows_impl(
 
 #[pyfunction]
 #[pyo3(signature = (data, budget_cells = None, max_ratio = DEFAULT_MAX_RATIO, min_formulas = DEFAULT_MIN_FORMULAS, prelude = true, lookup_budget = partition::DEFAULT_LOOKUP_BUDGET, now = None))]
+#[allow(clippy::too_many_arguments)]
 fn eval_partitioned(
     py: Python<'_>,
     data: Vec<u8>,
@@ -941,6 +945,7 @@ fn eval_partitioned(
 /// `n_batches`, and the chunk-plan stats when the chunk layout ran.
 #[pyfunction]
 #[pyo3(signature = (data, mode = "auto".to_string(), budget_cells = None, max_ratio = DEFAULT_MAX_RATIO, min_formulas = DEFAULT_MIN_FORMULAS, trim = false, prelude = true, lookup_budget = partition::DEFAULT_LOOKUP_BUDGET))]
+#[allow(clippy::too_many_arguments)]
 fn _benchmark_rows(
     py: Python<'_>,
     data: Vec<u8>,
@@ -1016,7 +1021,7 @@ fn _benchmark_rows(
                 })?;
                 let sheet = run.sheet();
                 let rows = RowIter {
-                    source: RowSource::Streamed { run, sheet },
+                    source: RowSource::Streamed { run: Box::new(run), sheet },
                     sheets,
                     sheet: 0,
                     row: 1,
@@ -1030,7 +1035,7 @@ fn _benchmark_rows(
                     .map_err(|e| PyRuntimeError::new_err(format!("partitioned eval failed: {e}")))?;
                 let rows = RowIter {
                     source: RowSource::Partitioned {
-                        topo,
+                        topo: Box::new(topo),
                         store,
                         values: evaluated.values,
                         spilled: evaluated.spilled.into_iter().map(|(s, r, c, v)| ((s, r, c), v)).collect(),
@@ -1063,7 +1068,7 @@ fn _benchmark_rows(
                 .map_err(|e| PyRuntimeError::new_err(format!("partitioned eval failed: {e}")))?;
             let rows = RowIter {
                 source: RowSource::Partitioned {
-                    topo,
+                    topo: Box::new(topo),
                     store,
                     values: evaluated.values,
                     spilled: evaluated.spilled.into_iter().map(|(s, r, c, v)| ((s, r, c), v)).collect(),
@@ -1183,6 +1188,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn rejected_formulas_are_never_reported_as_formula_free() {
         for min in [0, DEFAULT_MIN_FORMULAS] {
             let t = topology(&xlsx(&[("S", &cell_f("B1", "A1+"))]));
