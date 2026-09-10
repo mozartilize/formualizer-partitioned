@@ -25,7 +25,7 @@ libc = "0.2"
 # to an upstream tag once the fix is released.
 # https://github.com/mozartilize/formualizer/tree/fix/bulk-ingest-partial-vertex-set
 git = "https://github.com/mozartilize/formualizer"
-rev = "1cfb1a31"
+rev = "80802212"
 default-features = false
 features = ["common", "parse", "eval", "workbook", "calamine", "system-clock"]
 

@@ -77,6 +77,7 @@ use std::rc::Rc;
 
 use formualizer::common::value::LiteralValue;
 use formualizer::common::{CellAddress, RangeAddress};
+use formualizer::eval::engine::AstNodeId;
 use formualizer::eval::engine::inspect::{SnapshotOptions, SpillRole};
 use formualizer::parse::parser::{parse, ASTNode, ASTNodeType, ReferenceType};
 use formualizer::workbook::{Workbook, WorkbookConfig};
@@ -988,7 +989,7 @@ fn place_formulas(
         // binary on the same file: mismatches against a whole-file run moved
         // between 102 and 145 across ten runs, and were a fixed 39 once this
         // map was ordered.
-        let mut by_sheet: BTreeMap<u16, Vec<(u32, u32, ASTNode)>> = BTreeMap::new();
+        let mut by_sheet: BTreeMap<u16, Vec<(u32, u32, AstNodeId)>> = BTreeMap::new();
         for (sheet, row, col, ast) in unit {
             let name = &topo.sheets[sheet as usize].name;
             if reads_open_own_range(&ast, name) {
@@ -996,7 +997,8 @@ fn place_formulas(
                     .set_cell_formula(name, row, col, ast)
                     .map_err(|e| e.to_string())?;
             } else {
-                by_sheet.entry(sheet).or_default().push((row, col, ast));
+                let id = wb.engine_mut().intern_formula_ast(&ast);
+                by_sheet.entry(sheet).or_default().push((row, col, id));
             }
         }
 
@@ -1005,7 +1007,7 @@ fn place_formulas(
             // Row-major order is what the loader feeds the builder.
             list.sort_unstable_by_key(|&(r, c, _)| (r, c));
             let id = builder.add_sheet(&topo.sheets[sheet as usize].name);
-            builder.add_formulas(id, list);
+            builder.add_formula_ids(id, list);
         }
         builder.finish().map_err(|e| e.to_string())?;
     }

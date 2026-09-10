@@ -333,7 +333,7 @@ impl Values {
             }
             CellFormat::DateTime => {
                 LiteralValue::try_from_serial_number_for(DateSystem::Excel1900, n)
-                    .unwrap_or_else(LiteralValue::Error)
+                    .unwrap_or(LiteralValue::Number(n))
             }
             CellFormat::TimeDelta => {
                 let nanos = (n * 86_400.0 * 1_000_000_000.0).round();

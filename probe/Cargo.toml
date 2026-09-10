@@ -51,7 +51,7 @@ path = "chunkprobe.rs"
 # Keep this revision in step with the library manifest. A probe that measures a
 # different engine than the library builds against reports nothing useful.
 git = "https://github.com/mozartilize/formualizer"
-rev = "2be5f57e"
+rev = "80802212"
 default-features = false
 features = ["common", "parse", "eval", "workbook", "calamine", "system-clock"]
 
